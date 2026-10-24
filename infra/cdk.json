@@ -7,6 +7,7 @@
   "context": {
     "stage": "dev",
     "region": "us-east-2",
+    "domainName": "rader-resume.com",
     "githubOwner": "radermade",
     "githubRepo": "rader-resume",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,

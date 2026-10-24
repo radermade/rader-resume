@@ -12,7 +12,9 @@
     "diff": "cdk diff",
     "bootstrap:app": "cdk --app \"npx ts-node --prefer-ts-exts bin/bootstrap.ts\"",
     "diff:oidc": "npm run bootstrap:app -- diff rader-resume-github-oidc",
-    "deploy:oidc": "npm run bootstrap:app -- deploy rader-resume-github-oidc"
+    "deploy:oidc": "npm run bootstrap:app -- deploy rader-resume-github-oidc",
+    "diff:dns": "npm run bootstrap:app -- diff rader-resume-dns",
+    "deploy:dns": "npm run bootstrap:app -- deploy rader-resume-dns"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

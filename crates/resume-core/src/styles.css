@@ -1,0 +1,282 @@
+/* Inlined into the document. One request, well inside the 100 KB budget.
+   Extract to a content-hashed asset if it outgrows that. */
+
+:root {
+  /* Dark is the default, not a toggle away from light. */
+  --surface-sunken: #141414;
+  --surface: #242424;
+  --surface-raised: #2f3948;
+  --border: #32363a;
+
+  --text: #cfd0d0;
+  /* Lifted from the old site's #898989, which measured ~4.4:1 on --surface
+     and missed AA for body text by one hex step. */
+  --text-muted: #9a9a9a;
+
+  /* Two accents with distinct jobs. Warm is structure, cool is interactive,
+     never the reverse. Consistency is what makes this read as designed. */
+  --accent-warm: #df966c;
+  --accent-cool: #6fafd3;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2.5rem;
+  --space-6: 4rem;
+
+  --measure: 68ch;
+  --radius: 3px;
+
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
+    monospace;
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+}
+
+/* A separate token set, not an inversion. Inverting a dark palette produces
+   washed-out accents every time, so these are darkened to clear 4.5:1 on a
+   light surface. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --surface-sunken: #f4f3f1;
+    --surface: #ffffff;
+    --surface-raised: #e9ebee;
+    --border: #d9d6d2;
+
+    --text: #1b1b1b;
+    --text-muted: #585858;
+
+    --accent-warm: #a1512a;
+    --accent-cool: #1d5c83;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding-block: var(--space-5);
+  padding-inline: var(--space-3);
+  background-color: var(--surface-sunken);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+}
+
+main {
+  max-width: 54rem;
+  margin-inline: auto;
+}
+
+a {
+  color: var(--accent-cool);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-cool);
+  outline-offset: 2px;
+}
+
+/* Structure, not decoration: monospace carries the developer tone without
+   ornament. */
+h1,
+h2,
+h3,
+.meta {
+  font-family: var(--font-mono);
+  line-height: 1.25;
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  margin: 0;
+}
+
+h2 {
+  font-size: 1.25rem;
+  color: var(--accent-warm);
+  margin-block: var(--space-6) var(--space-3);
+  padding-block-end: var(--space-2);
+  border-block-end: 1px solid var(--border);
+}
+
+/* The bracket motif lives here, never in the content document. The `/ ""`
+   sets empty alternative text so assistive technology skips the decoration. */
+h2::before {
+  content: "< " / "";
+  color: var(--accent-cool);
+}
+
+h2::after {
+  content: " >" / "";
+  color: var(--accent-cool);
+}
+
+h3 {
+  font-size: 1.05rem;
+  margin-block: 0 var(--space-1);
+}
+
+p {
+  max-width: var(--measure);
+  margin-block: 0 var(--space-3);
+}
+
+.lede {
+  color: var(--accent-warm);
+  font-family: var(--font-mono);
+}
+
+.meta {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.profile {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+/* One element, one rule. The old site stacked three rotated rectangles per
+   shape and hand-positioned fourteen instances by ID. */
+.hex {
+  flex: none;
+  inline-size: 5.5rem;
+  aspect-ratio: 1.1547;
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+  background-color: var(--surface-raised);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  color: var(--accent-warm);
+}
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.entry {
+  background-color: var(--surface);
+  border-inline-start: 2px solid var(--accent-cool);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-block-end: var(--space-3);
+}
+
+/* A break is not a job, so it does not look like one. */
+.entry--break {
+  border-inline-start-color: var(--text-muted);
+  background-color: transparent;
+}
+
+.entry ul {
+  margin-block: var(--space-2) 0;
+  padding-inline-start: var(--space-3);
+  color: var(--text-muted);
+}
+
+.entry li {
+  margin-block-end: var(--space-1);
+  max-width: var(--measure);
+}
+
+.skill-group {
+  margin-block-end: var(--space-4);
+}
+
+footer {
+  max-width: 54rem;
+  margin: var(--space-6) auto 0;
+  padding-block-start: var(--space-3);
+  border-block-start: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Print: light regardless of screen theme, single column, no decoration
+   carrying meaning. Nobody wants a dark-mode resume through a printer, and
+   "Save as PDF" from here should produce something a parser can read.
+
+   This is not the ATS artifact. That is a separate rendering produced by the
+   publish pipeline. */
+@media print {
+  :root {
+    --surface-sunken: #ffffff;
+    --surface: #ffffff;
+    --surface-raised: #ffffff;
+    --border: #cccccc;
+    --text: #000000;
+    --text-muted: #333333;
+    --accent-warm: #000000;
+    --accent-cool: #000000;
+  }
+
+  body {
+    padding: 0;
+    font-size: 11pt;
+    line-height: 1.4;
+  }
+
+  main,
+  footer {
+    max-width: none;
+  }
+
+  /* Decoration off: the brackets and the monogram carry no information. */
+  h2::before,
+  h2::after {
+    content: "" / "";
+  }
+
+  .hex {
+    display: none;
+  }
+
+  h2 {
+    margin-block: 1.25em 0.5em;
+    border-block-end: 1px solid var(--border);
+  }
+
+  .entry {
+    border-inline-start: none;
+    padding-inline: 0;
+    break-inside: avoid;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  /* Links are useless on paper unless the target is visible. */
+  main a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.85em;
+    color: var(--text-muted);
+  }
+}
