@@ -1,0 +1,201 @@
+{
+  "schemaVersion": 1,
+  "profile": {
+    "fullName": "William \"Matt\" Rader",
+    "preferredName": "Matt",
+    "headline": "Frontend Engineer | AI Prompt Engineering | AWS Solutions Architecture",
+    "location": "Kansas City, MO",
+    "email": "[contact-email]",
+    "links": [
+      { "label": "GitHub", "url": "[github-url]" },
+      { "label": "LinkedIn", "url": "[linkedin-url]" },
+      { "label": "Portfolio", "url": "[site-url]" }
+    ],
+    "summary": "Frontend engineer with 17 years building user-facing software: data-driven marketing sites, large-scale games, enterprise platforms, and regulated data systems in healthcare and insurance. Two years in systems and DevOps engineering on federal healthcare contracts broadened that foundation into infrastructure and production reliability. Now back in React development with a focus on integrating LLM capabilities into product and establishing prompt engineering practice for my team. Currently building serverless architecture on AWS in Rust, working toward solutions architecture with generative ai sas the next step."
+  },
+  "roles": [
+    {
+      "slug": "nipr",
+      "employer": "National Insurance Producer Registry (NIPR)",
+      "title": "[Current Title]",
+      "start": "2023-10",
+      "end": "current",
+      "arrangement": "[remote | hybrid | onsite]",
+      "highlights": [
+        "Develop and maintain React application features for [product area, e.g. LicenseHub producer licensing platform] as part of a [team size] engineering team.",
+        "Build interfaces for insurance producer licensing and compliance data serving state regulators and the insurance industry nationwide.",
+        "Work in TypeScript and Next.js on systems that generate client types directly from OpenAPI specifications, so API contract changes surface at compile time instead of in production.",
+        "Integrate LLM-backed capabilities into user-facing product surfaces: prompt design, output evaluation, and iteration against real usage.",
+        "Established reusable prompt engineering practice for the team, including structured prompt patterns, evaluation criteria, and guardrails for AI-generated output that reaches users.",
+        "Mentor engineers on applying AI tooling to daily development without relaxing code review standards.",
+        "[Metric: adoption, delivery speed, defect rate, or cost impact of the AI work]"
+      ]
+    },
+    {
+      "slug": "cerner",
+      "employer": "Cerner (Oracle Health)",
+      "title": "Interface Engineer II",
+      "start": "2021",
+      "end": "2023-09",
+      "arrangement": "remote",
+      "highlights": [
+        "Delivered and maintained healthcare data interface systems on federal contract for the Veterans Administration and Department of Defense.",
+        "Moved from application development into systems and DevOps engineering: [name the deployment tooling, environment management, and monitoring stack].",
+        "Diagnosed and resolved production interface failures across [environments/systems], coordinating with clinical and federal stakeholders under contractual timelines.",
+        "Led onboarding, mentoring, and code review for junior and incoming engineers on a fully distributed team."
+      ]
+    },
+    {
+      "slug": "cinema-scene-marketing",
+      "employer": "Cinema Scene Marketing",
+      "title": "Senior Software Engineer",
+      "start": "2016",
+      "end": "2018",
+      "highlights": [
+        "Primary React developer on an enterprise digital signage platform deployed across [number] venues.",
+        "Built digital box office, interactive touchscreen, and dynamic signage interfaces used by venue staff and the public.",
+        "Owned frontend architecture decisions as the platform grew, including component structure and state management patterns.",
+        "Worked in TypeScript on the platform frontend from 2016, early relative to its broad adoption across the React ecosystem.",
+        "Worked within an established delivery process using Jira, Confluence, and code review."
+      ]
+    },
+    {
+      "slug": "walt-disney-company",
+      "employer": "The Walt Disney Company",
+      "title": "Senior Software Engineer",
+      "start": "2011",
+      "end": "2015",
+      "highlights": [
+        "Built large-scale children's games and enterprise content management software.",
+        "Implemented microtransaction, registration, account management, and purchase flows serving [scale] users.",
+        "Introduced to React late in this tenure as teams moved toward component-based UI; primary development in JavaScript, Python, and Lua.",
+        "Operated in a mature release process with staged deployments and content management tooling."
+      ]
+    },
+    {
+      "slug": "cisco-systems",
+      "employer": "Cisco Systems",
+      "title": "Customer Facing Engineer",
+      "start": "2009",
+      "end": "2011",
+      "highlights": [
+        "Customized a device-based content management and video player platform for enterprise customers.",
+        "Prototyped features on site with customers and merged successful experiments into the product roadmap.",
+        "Built real-time debugging practices with offsite developers to resolve high-pressure customer escalations."
+      ]
+    },
+    {
+      "slug": "vml",
+      "employer": "VML",
+      "title": "Web Developer",
+      "start": "2006",
+      "end": "2008",
+      "highlights": [
+        "Developed data-driven websites, video players, and interactive content for Dr Pepper, Snapple, 7up, Xbox, Ford, and Microsoft Forefront.",
+        "Implemented analytics instrumentation across high-traffic client properties."
+      ]
+    }
+  ],
+  "careerBreaks": [
+    {
+      "slug": "career-break-2018",
+      "start": "2018",
+      "end": "2021",
+      "reason": "Full-time family caregiving",
+      "note": "Earned FAA Part 107 Remote Pilot certification during this period."
+    }
+  ],
+  "skills": [
+    {
+      "slug": "ai-prompt-engineering",
+      "title": "AI and Prompt Engineering",
+      "items": [
+        "Prompt design, structured prompting, and output evaluation",
+        "LLM integration into product user interfaces",
+        "AI-assisted development workflows and team practice",
+        "[Specific models, platforms, or frameworks you use]"
+      ]
+    },
+    {
+      "slug": "frontend",
+      "title": "Frontend",
+      "items": [
+        "TypeScript, React, Next.js, Redux, component architecture, state management",
+        "JavaScript (ES5 through current), HTML5, CSS",
+        "Type generation from OpenAPI specifications, typed API contracts",
+        "Responsive layout, semantic markup, web accessibility and WCAG-aligned development"
+      ]
+    },
+    {
+      "slug": "cloud-serverless",
+      "title": "Cloud and Serverless (AWS)",
+      "items": [
+        "Lambda, Step Functions, S3, CloudFront, DynamoDB, EventBridge, IAM",
+        "Event-driven and state machine orchestration",
+        "Infrastructure as code, least-privilege access design"
+      ]
+    },
+    {
+      "slug": "platform-devops",
+      "title": "Platform and DevOps",
+      "items": [
+        "CI/CD pipelines, GitHub Actions",
+        "Production troubleshooting, observability, structured logging",
+        "Systems integration across regulated environments",
+        "[Containers, Kubernetes, or other orchestration if applicable]"
+      ]
+    },
+    {
+      "slug": "languages",
+      "title": "Languages",
+      "items": [
+        "TypeScript, JavaScript, Python, Rust, Lua",
+        "JSON, XML, OpenAPI, SQL [confirm]"
+      ]
+    },
+    {
+      "slug": "practices",
+      "title": "Practices",
+      "items": [
+        "REST API design and integration",
+        "Testing with Jest and Playwright: unit, integration, and end-to-end",
+        "Agile and Scrum delivery",
+        "Code review, mentoring, distributed team collaboration",
+        "Prototyping and rapid iteration"
+      ]
+    },
+    {
+      "slug": "tooling",
+      "title": "Tooling",
+      "items": [
+        "Git, GitHub",
+        "Jira, Confluence",
+        "Postman",
+        "JetBrains IDEs, VS Code"
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "slug": "living-resume-platform",
+      "name": "Living Resume and Portfolio Platform",
+      "status": "in progress",
+      "url": "[site-url]",
+      "repo": "[repo-url]",
+      "summary": "Serverless resume and portfolio built in Rust on AWS Lambda. Server-rendered with axum and maud behind CloudFront, with git as the source of truth and Step Functions orchestrating publishing, scheduled content enrichment, and a visitor-facing interactive flow using the callback pattern.",
+      "highlights": [
+        "Designed a publish pipeline where artifacts are immutable and keyed by commit SHA, making rollback a manifest pointer flip rather than a rebuild.",
+        "Used Step Functions for the workflows that are genuinely stateful, with a CQRS-style read projection so page rendering never queries execution state.",
+        "Built on a least-privilege, no-always-on-compute footprint."
+      ]
+    }
+  ],
+  "certifications": [
+    {
+      "slug": "faa-part-107",
+      "name": "FAA Part 107 Remote Pilot",
+      "issued": "[year]"
+    }
+  ],
+  "education": []
+}

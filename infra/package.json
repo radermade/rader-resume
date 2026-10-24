@@ -1,0 +1,28 @@
+{
+  "name": "rader-resume-infra",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "infra": "bin/app.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy",
+    "diff": "cdk diff",
+    "bootstrap:app": "cdk --app \"npx ts-node --prefer-ts-exts bin/bootstrap.ts\"",
+    "diff:oidc": "npm run bootstrap:app -- diff rader-resume-github-oidc",
+    "deploy:oidc": "npm run bootstrap:app -- deploy rader-resume-github-oidc"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "aws-cdk": "^2.1000.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.160.0",
+    "cargo-lambda-cdk": "^0.0.36",
+    "constructs": "^10.3.0"
+  }
+}

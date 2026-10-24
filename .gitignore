@@ -1,0 +1,8 @@
+/target
+**/node_modules
+infra/cdk.out
+infra/*.js
+infra/*.d.ts
+.env
+.DS_Store
+._*
