@@ -1,6 +1,6 @@
 # Phase 1 — Walking Skeleton
 
-Status: complete pending first CI deploy
+Status: complete
 
 Goal: one trivial Rust Lambda, deployed by CI, reachable over HTTPS.
 

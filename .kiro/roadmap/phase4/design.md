@@ -43,16 +43,30 @@ integration rather than a Lambda if it only writes a diagnostic object.
 `FlipManifest` and `Invalidate` are candidates for direct SDK integrations too.
 Any task that would only forward a single call should not be a Lambda.
 
-## Rendering versus the request path
+## Rendering moves here
 
-Phase 3 renders on request from embedded content. Phase 4 renders artifacts
-ahead of time. Both call the same `resume-core` functions, so there is one
-source of markup and the snapshot tests cover both.
+Resolved: the pipeline becomes the only renderer, and reads become static.
 
-Open question: whether the site handler should serve the pre-rendered artifact
-rather than rendering per request. Serving the artifact makes the pipeline
-authoritative and the handler trivial, but reintroduces a runtime fetch that
-embedding was chosen to avoid. Decide before building, not after.
+Phase 3 renders on request from content embedded in the binary. That is a
+stepping stone. Here, `tasks/render` produces the HTML and JSON artifacts, and
+CloudFront serves them from S3 behind the manifest. Reads cost zero Lambda
+invocations and the handler keeps only the fit analysis.
+
+Both callers use the same `resume-core` functions, which is why this is a
+change in caller rather than a rewrite, and why the snapshot tests keep working
+across the move.
+
+Consequences worth planning for:
+
+- `/api/resume`, `/api/projects`, and `/api/schema` become artifacts, not
+  handlers. Their ETags come from the artifact, so the fingerprint logic moves
+  into the render task.
+- CloudFront behaviors invert: S3 becomes the default origin and the function
+  gets specific paths, rather than the other way round.
+- The embedded `include_str!` content stays useful for the fit analysis, which
+  needs the corpus in process to match against.
+- Nothing visitor-specific may render into those artifacts. That constraint is
+  recorded in the design and frontend steering, and theming is where it bites.
 
 ## Open questions
 

@@ -24,18 +24,26 @@ rendering layer where it can change without touching the record.
 
 ## Theming
 
-- Dark is the default, not a toggle away from light.
-- Respect `prefers-color-scheme` for first-time visitors with no preference
-  set.
-- An explicit toggle overrides it, and the choice persists in a cookie rather
-  than `localStorage`. This matters because the site is server-rendered: the
-  handler reads the cookie and emits the correct theme in the initial HTML.
-  A `localStorage` toggle would produce a flash of the wrong theme on every
-  page load, which is the most common way SSR sites give themselves away.
-- The toggle degrades without JavaScript. A form post that sets the cookie and
-  re-renders is acceptable and costs one round trip.
-- Never theme by swapping stylesheets. One stylesheet, custom properties
-  redefined under a `[data-theme]` attribute on the root element.
+Dark is the default, not a toggle away from light. Respect
+`prefers-color-scheme` for visitors with no explicit preference.
+
+Theming must not require per-request rendering. Pre-rendered artifacts are the
+target for reads, and a handler that injects a per-visitor theme into HTML
+forecloses that. Options in order of preference:
+
+1. CSS only. Dark by default, `prefers-color-scheme: light` override, no manual
+   toggle. Covers most visitors at zero cost and zero complexity.
+2. Pure-CSS toggle using a checkbox and `:has()`. Works without JavaScript,
+   does not persist across pages.
+3. Cookie in the CloudFront cache key, serving two cached variants. Persists,
+   still needs no Lambda, doubles cache entries.
+
+A `localStorage` toggle is not an option: it produces a flash of the wrong
+theme on every load, which is the most common way a themed site gives itself
+away.
+
+Never theme by swapping stylesheets. One stylesheet, custom properties
+redefined under a `[data-theme]` attribute on the root element.
 
 ## Tokens
 

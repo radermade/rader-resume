@@ -12,7 +12,7 @@ decisions so they do not drift into two places.
 | Phase | Name | Status |
 | --- | --- | --- |
 | [0](phase0/) | Discovery and decisions | Complete |
-| [1](phase1/) | Walking skeleton | Complete pending first CI deploy |
+| [1](phase1/) | Walking skeleton | Complete |
 | [2](phase2/) | Content model and storage | In progress |
 | [3](phase3/) | Public site | Not started |
 | [4](phase4/) | Publishing pipeline | Designed, not started |
@@ -26,11 +26,14 @@ produces documents that get rewritten.
 
 ## Immediate next actions
 
-1. Set `AWS_DEPLOY_ROLE_ARN` and `AWS_REGION` repo variables, create the `dev`
-   GitHub environment, push to `main`, confirm a live URL. Closes Phase 1.
-2. ETag and commit SHA surfacing, then derived values. See `phase2/tasks.md`.
+1. Enable branch protection on `main`. Everything after the initial push goes
+   through pull requests, per the pipeline steering.
+2. Finish Phase 2: commit SHA surfacing and ETags, then derived values. See
+   `phase2/tasks.md`.
 3. Fill the content placeholders listed in `phase0/tasks.md`. Not code work,
    but the pipeline will refuse to publish while they remain.
+4. Decide open question 7 before starting Phase 4, since it changes what the
+   site handler does.
 
 ## Guiding principles
 
@@ -89,5 +92,11 @@ Recorded so they are not relitigated. Reasoning is in the relevant
    ceiling, monthly Bedrock budget. Numbers before launch, not after the first
    bill.
 6. Domain name and registrar.
-7. Does the site handler serve pre-rendered artifacts after Phase 4, or keep
-   rendering per request from embedded content?
+7. ~~Pre-rendered artifacts or per-request rendering?~~ Decided: static-first.
+   The question was framed as SSR versus a runtime fetch, but for content that
+   changes only on commit the real comparison is request-time versus
+   publish-time rendering, and publish-time wins on latency, cost, and failure
+   modes. Reads become static artifacts served by CloudFront; the Lambda keeps
+   only the fit analysis. Phase 3 ships with request-time rendering as a
+   stepping stone, and Phase 4 switches the caller. Hard constraint: nothing
+   visitor-specific may depend on per-request rendering.

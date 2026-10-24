@@ -61,6 +61,12 @@ jobs:
 
       - name: Deploy
         working-directory: infra
+        env:
+          # Baked into the binary for provenance and derived values. cargo
+          # rebuilds on change because build.rs declares these as triggers.
+          GIT_SHA: ${{ github.sha }}
+          SITE_URL: https://rader-resume.com
         run: |
+          export BUILD_MONTH="$(date -u +%Y-%m)"
           npm ci
           npx cdk deploy rader-resume-dev --require-approval never --context stage=dev

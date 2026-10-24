@@ -4,13 +4,31 @@ inclusion: always
 
 # Frontend and Routing
 
-Decision: server-rendered HTML from the Lambda using `axum` for routing and
-`maud` for templates, with htmx for interactivity. No WASM SPA.
+Decision: server-rendered HTML with `maud`, routed by `axum`, htmx for
+interactivity. No WASM SPA.
 
-Rationale: a resume site is read by recruiters on phones and by crawlers. SSR
-wins on first paint and SEO, and collapses three routing layers into one. The
-main argument for WASM is sharing `resume-core` types into the browser, but
-with SSR the rendering already happens where those types live.
+Rationale: a resume site is read by recruiters on phones and by crawlers.
+Server rendering wins on first paint and SEO, and collapses three routing
+layers into one. The main argument for WASM is sharing `resume-core` types into
+the browser, but rendering already happens where those types live.
+
+## Where rendering happens
+
+Amended after Phase 2. Rendering at request time and rendering at publish time
+are both server rendering; the difference is when.
+
+Content changes only on commit, so rendering identical HTML on every request is
+waste. The target is static-first: the publish pipeline renders artifacts with
+the same `resume-core` functions, CloudFront serves them from S3, and the
+Lambda handles only what is genuinely dynamic. Reads cost zero invocations.
+
+- Until Phase 4 exists, the handler renders on request from embedded content.
+  That is a stepping stone, not the destination.
+- Rendering functions take typed data and return `Markup`, with no AWS or HTTP
+  types in their signatures. That is what makes the caller swappable.
+- Nothing visitor-specific may depend on per-request rendering, or the static
+  path becomes impossible. This is a hard constraint, and theming is where it
+  bites.
 
 ## The three routing layers
 

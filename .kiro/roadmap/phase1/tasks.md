@@ -30,9 +30,21 @@ Status: one task remaining
 - [x] `cargo test` passes
 - [x] `cargo clippy --all-targets -- -D warnings` clean
 
-## Remaining
+## Deploy
 
-- [ ] Set `AWS_DEPLOY_ROLE_ARN` and `AWS_REGION` repo variables, create the
-      `dev` GitHub environment, commit and push to `main`, confirm a live URL
+- [x] `AWS_DEPLOY_ROLE_ARN` and `AWS_REGION` repo variables set
+- [x] `dev` GitHub environment created
+- [x] Pushed to `main`, CI built and deployed `rader-resume-dev`
 
 Role ARN: `arn:aws:iam::<account>:role/rader-resume-github-deploy-dev`
+
+## Follow-ups
+
+Not Phase 1 blockers, but needed before the Phase 4 pull-request flow is real.
+
+- [ ] Enable branch protection on `main`: no direct pushes, PR required, CI
+      green required. The first push had to create the branch, which is why
+      this comes after rather than before.
+- [ ] Confirm the Function URL actually serves the page and `/api/resume`
+      returns the document
+- [ ] Root credential cleanup, tracked in `phase7/tasks.md`

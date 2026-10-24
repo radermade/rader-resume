@@ -18,23 +18,21 @@ GET  /api/projects     JSON
 GET  /healthz
 ```
 
-## Theme without a flash
+## Theme, without foreclosing static
 
-The handler reads a `theme` cookie and emits `data-theme` on `<html>` in the
-initial response. No client-side correction, so no flash.
+Open question 7 resolved to static-first reads, which rules out injecting a
+per-visitor theme into HTML at request time. Start with the CSS-only approach:
+dark by default, `prefers-color-scheme: light` override, no manual toggle. It
+covers most visitors, costs nothing, and works identically whether the HTML
+came from a Lambda or from S3.
 
-Resolution order: cookie, then `prefers-color-scheme` via a media query in CSS
-that only applies when the cookie is absent, then dark. Expressing the fallback
-in CSS rather than in the handler keeps the server from needing to guess at a
-client preference it cannot see.
+If a persistent manual toggle turns out to matter, the escalation is a cookie
+in the CloudFront cache key serving two cached variants, not a handler that
+renders per visitor. A pure-CSS `:has()` toggle is the middle option and does
+not persist across pages.
 
-`POST /theme` sets the cookie and redirects to the referrer. That is the
-no-JavaScript path and it costs one round trip. htmx can swap it in place
-later; the form works either way.
-
-Theme responses must not be cached by CloudFront, and any page whose markup
-varies by cookie needs either `Vary: Cookie` or a cache policy including the
-cookie in the key. Getting this wrong serves one visitor's theme to another.
+`POST /theme` and the `Vary: Cookie` question only exist in the cache-key
+variant. Do not build them speculatively.
 
 ## Rendering
 
@@ -84,9 +82,36 @@ Behaviors, ordered:
 Once CloudFront fronts the function, the Function URL stops being the public
 entry point and should be restricted.
 
+## DNS
+
+Domain: `rader-resume.com`, registered at Squarespace, currently pointing at
+the dead site.
+
+Registration stays at Squarespace; DNS delegates to Route 53. The reason is
+the apex: `rader-resume.com` cannot be a CNAME, and Squarespace DNS has no
+alias record type that can target a CloudFront distribution. Route 53 alias
+records can, and it puts DNS in IaC with everything else.
+
+The hosted zone lives in the bootstrap app with a retain policy, not in the
+application stack. Recreating a zone issues new nameservers, which means
+re-entering them at the registrar and waiting out propagation again. The
+application stack looks the zone up rather than owning it.
+
+Cutover order matters, because each step blocks the next:
+
+1. Deploy the hosted zone, read the nameservers from the stack output.
+2. Set those as custom nameservers at Squarespace. Propagation is hours, not
+   minutes.
+3. Deploy the ACM certificate in `us-east-1`. DNS validation writes records
+   into the hosted zone automatically, and fails if delegation has not landed.
+4. Deploy CloudFront, test against the distribution domain directly.
+5. Only then point the apex and `www` at the distribution.
+
+Testing against the CloudFront domain before the DNS flip means a broken
+deploy never takes the domain down with it.
+
 ## Open questions
 
-- Domain name and registrar.
 - Whether `/projects/{slug}` is worth having before there are projects beyond
   this one.
 - Fresh portrait, or the existing eight-year-old one as a stopgap.

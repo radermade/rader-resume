@@ -1,16 +1,23 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    // CommonJS, not NodeNext. CDK constructs and ts-node both expect it, and
+    // dependencies reach into deep aws-cdk-lib paths that NodeNext's exports
+    // map resolution rejects.
+    "module": "commonjs",
     "lib": ["ES2022"],
     "strict": true,
     "noImplicitOverride": true,
+    "noImplicitReturns": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
+    // Third-party declaration files are not ours to fix, and checking them
+    // means a dependency's internal typing error fails our build.
+    "skipLibCheck": true,
     "declaration": true,
     "inlineSourceMap": true,
-    "types": ["node"]
+    "inlineSources": true,
+    "typeRoots": ["./node_modules/@types"]
   },
   "include": ["bin/**/*.ts", "lib/**/*.ts"],
   "exclude": ["node_modules", "cdk.out"]

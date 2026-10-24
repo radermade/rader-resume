@@ -6,3 +6,11 @@ infra/*.d.ts
 .env
 .DS_Store
 ._*
+
+# Reference material only, kept locally. Git tracked this as a gitlink because
+# it carries its own .git directory, so its contents were never committed
+# anyway. Deliberately excluded: it contains a real phone number, a personal
+# email address, and an old Firebase API key, none of which belong in a repo
+# that will be public. Everything worth keeping was extracted into
+# content/resume.json and .kiro/roadmap/phase0/.
+/.kiro/old-resume/
