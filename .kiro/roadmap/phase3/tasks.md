@@ -75,13 +75,24 @@ Ordered, because each step blocks the next.
       as custom nameservers at Squarespace. Propagation is hours
 - [ ] Confirm delegation: `dig NS rader-resume.com` returns the Route 53
       nameservers
-- [ ] ACM certificate in `us-east-1` via a cross-region stack. DNS validation
-      fails until delegation has landed
-- [ ] CloudFront distribution, behaviors in the documented order
-- [ ] S3 static assets bucket with OAC
-- [ ] Test against the distribution domain before touching the apex record
-- [ ] Alias records for the apex and `www`
-- [ ] Restrict the Function URL once CloudFront fronts it
+- [x] Delegation confirmed via `dig`
+- [x] `CertificateStack` in `us-east-1`, covering the apex and `www`, validated
+      by DNS against the hosted zone
+- [x] CloudFront distribution: Function URL origin, short TTL with ETag
+      revalidation, no cookie or query string in the cache key, price class 100,
+      HTTP/3, TLS 1.2 minimum
+- [x] Alias A and AAAA records for the apex and `www`
+- [ ] `npx cdk bootstrap aws://<account>/us-east-1`, required before the
+      certificate stack can deploy
+- [ ] Deploy, then test against the distribution domain before trusting the
+      apex record
+- [ ] Decide `www` handling. Both hostnames currently serve the same content
+      with a canonical pointing at the apex, which is acceptable but a 301 via
+      a CloudFront Function would be cleaner
+- [ ] S3 static assets bucket with OAC. Deferred to Phase 4, where the origin
+      inverts and S3 becomes the default
+- [ ] Restrict the Function URL to `AWS_IAM` with origin access control, so the
+      origin cannot be reached directly and bypass the cache and edge controls
 
 ## Content and SEO
 

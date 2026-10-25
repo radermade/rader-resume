@@ -38,6 +38,13 @@ jobs:
           npm ci
           npx tsc --noEmit
 
+      # The architecture document's own invariants (schema version, unique
+      # ids, no placeholders, well-formed CloudFormation types) are covered by
+      # `cargo test` above. Cross-checking it against the real stacks needs a
+      # cloud assembly, which needs every Rust binary built, so that half runs
+      # in the deploy job where the build is already being paid for. A wrong
+      # diagram therefore blocks a deploy rather than a pull request.
+
   deploy:
     needs: check
     if: github.ref == 'refs/heads/main'
@@ -69,4 +76,19 @@ jobs:
         run: |
           export BUILD_MONTH="$(date -u +%Y-%m)"
           npm ci
-          npx cdk deploy rader-resume-dev --require-approval never --context stage=dev
+
+          # Synthesize once, then deploy from that assembly. The architecture
+          # check needs a real assembly to compare against, and synthesizing
+          # twice means building every Rust binary twice.
+          #
+          # The certificate stack is in us-east-1 and the site stack depends on
+          # it, so CDK orders them. Both are named to keep bootstrap stacks out.
+          npx cdk synth rader-resume-cert rader-resume-dev \
+            --context stage=dev --quiet
+
+          # A diagram that claims a service this stack does not run never
+          # reaches the live site.
+          npm run check:architecture
+
+          npx cdk deploy rader-resume-cert rader-resume-dev \
+            --app cdk.out --require-approval never

@@ -9,8 +9,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# Content Security Policy hashes. Still no AWS or Lambda dependency here, and
+# both of these are pure Rust, so the crate stays WASM-capable.
+base64 = { workspace = true }
 maud = { workspace = true }
 schemars = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -8,9 +8,11 @@
     "stage": "dev",
     "region": "us-east-2",
     "domainName": "rader-resume.com",
+    "hostedZoneId": "Z05927452DEMZDEUMM8PW",
     "githubOwner": "radermade",
     "githubRepo": "rader-resume",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:defaultCrossStackReferences": "strong",
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": ["aws"]
   }

@@ -1,88 +1,195 @@
 # Phase 6 — Design
 
-Status: shape settled. Model choice and thresholds open.
+Status: domain layer built in `resume-core::fit`. Views and endpoint pending.
 
-Rules for model calls live in `.kiro/steering/ai-integration-standards.md`.
+## Shape
+
+```
+POST /fit  (form post, text/plain body or urlencoded field)
+  -> JobDescription::new          cap, normalize, fingerprint
+  -> extract(taxonomy, text)      Vec<Requirement>
+  -> for each requirement:
+       search(corpus, text)       ranked CorpusEntry hits
+       assess(hits)               Verdict + Citation list + rationale
+  -> FitReport { requirements, assessments, provenance }
+  -> report.validate(resume)      every citation resolves or the whole report
+                                  is rejected
+  -> render
+```
+
+One request, no persistence, no async. The fingerprint is retained as a cache
+key for an ETag and for deduplicating identical submissions, not as a session
+identifier.
+
+## Why no state machine
+
+Three of the five characteristics that justify orchestration are absent: there
+is no step slow enough to exceed a request, no step that fails in a way worth
+retrying separately, and no run worth inspecting after the fact. Fan-out over
+requirements is a loop over a few dozen string comparisons.
+
+Building a state machine here would be visible over-engineering, which is
+precisely the thing the architecture is meant to demonstrate judgement about.
+
+## Extraction without a model
+
+A taxonomy in `content/skills-taxonomy.json`: canonical skill names with
+aliases, so "JS", "JavaScript", and "ES6" collapse to one entry, and "LLM",
+"GenAI", and "generative AI" to another.
+
+Extraction then is:
+
+1. Split the description into sections, detecting required and preferred
+   headings by keyword.
+2. Match taxonomy entries against each section.
+3. `kind` comes from which section matched. Ambiguous means `niceToHave`.
+4. `id` is the canonical skill slug, which makes requirements stable across
+   submissions for the same posting.
+
+Limitations, stated plainly because they are real: anything outside the
+taxonomy is invisible, and a description phrasing a requirement unusually will
+be missed. The mitigation is that the taxonomy is content in git, so a missed
+requirement is a one-line content fix rather than a prompt tuning exercise.
+
+That tradeoff is the honest version of the model comparison. A model would
+generalize to unseen phrasing; the taxonomy will not. The taxonomy is free,
+instant, deterministic, and explainable.
+
+## Assessment without a model
+
+`search` already ranks corpus entries by term overlap. Verdict from the hit
+count relative to the requirement's term count, with thresholds tuned against
+real job descriptions rather than guessed.
+
+The rationale is templated: the matched terms plus the cited text. Arguably
+better than generated prose, because it cannot editorialize or inflate.
+
+## The seam
+
+Extraction and assessment sit behind traits so a model implementation is an
+addition rather than a rewrite. The prompts, the `RequirementSet` schema, and
+`resolve_evidence_ids` already exist and are tested, so that path is designed
+rather than merely imagined.
+
+## UI
+
+`/fit` is a page with a `<textarea>` and a submit button. It works with
+JavaScript disabled, which is the baseline.
+
+The modal is a `<dialog>` enhancement containing the same form. Drag-and-drop
+accepts `text/plain` from the DataTransfer, which covers dragging a highlighted
+selection from a job board and needs no parsing.
+
+Visitor text is escaped on render, which maud does by default. The report shows
+cited resume text, not the submitted text, so there is little surface for
+reflected content in the first place.
+
+## File uploads, and why not yet
+
+Accepting PDF or DOCX means a parser dependency reachable from an
+unauthenticated endpoint, with untrusted binary input. Zip bombs via DOCX,
+malformed PDFs targeting allocators, and wildly inconsistent document structure
+are all real.
+
+If added: presigned S3 PUT so binaries never pass through the Lambda, a
+separate extraction step with hard size and page limits, and explicit handling
+for the "extraction produced nothing useful" case, which will be common.
+
+That is a project, not a checkbox, and it does not change the orchestration
+answer.
+
+## Open
+
+- Verdict thresholds. Need a handful of real job descriptions to tune against.
+- Whether the taxonomy is hand-written or seeded from the skills already in
+  `content/resume.json`. Seeding is tempting but would only ever match what the
+  resume already claims, which defeats gap detection.
+
+---
+
+# 6A — Live provenance check
+
+The state machine feature, added after the fit analysis became synchronous and
+stopped justifying orchestration.
 
 ## Workflow
 
 ```
-Ingest              normalize, hash, write text to S3, return the key
-  -> CheckCache     Choice on the hash: existing analysis? return it
-  -> ExtractRequirements   Bedrock, JSON-schema-constrained output
-                           Retry on throttling with backoff and jitter
-                           validation failure -> RecordFailure, no retry
-  -> Map over requirements
-       -> MatchRequirement   retrieve evidence, produce cited rationale
-       ToleratedFailurePercentage: 10
-  -> ScoreAndAssemble
-  -> RenderVariant  tailored HTML + PDF under the analysis prefix
-  -> Finalize       projection status complete
-Catch on every task -> RecordFailure with a readable diagnostic
+POST /provenance
+  -> plan(resume, commit)        deterministic check list
+  -> run_id(plan, commit)        cache key and execution name
+  -> cached and fresh?           redirect to the existing run
+  -> StartExecution
+
+Plan                             write the queued projection
+  -> Map over checks             MaxConcurrency bounded
+       -> RunCheck               one outbound call per invocation
+          Retry on transport errors, backoff with jitter
+          ToleratedFailurePercentage: 100
+  -> Summarize                   write the terminal projection
+Catch -> RecordFailure           run-level failure only
 ```
 
-## Why this feature and not a career walkthrough
+`ToleratedFailurePercentage: 100` looks odd and is deliberate. A check that
+cannot reach its target is a *result*, not a workflow failure. Every branch is
+allowed to fail without failing the run, because "eleven of twelve passed, one
+timed out" is the honest answer and the most likely one.
 
-A linear tour of a career is a wizard with no decisions in it. Step Functions
-would be visibly over-engineered, and a reviewer who knows the service spots a
-misapplied state machine faster than they notice one was used at all. That
-would work against the exact claim the project exists to support.
+## Three outcomes, never two
 
-This feature instead has four of the five characteristics that justify
-orchestration: multiple steps with distinct failure modes, work too slow for a
-request, fan-out over independent items, and retries that matter.
+The design hinges on separating these:
 
-It is also useful to the person it is aimed at, and it produces the per-role
-variant generation that is the single feature most likely to actually land
-interviews.
+- `Passed` — reached it, it agreed.
+- `Unreachable` — could not reach it. Says nothing about the claim. Corporate
+  sites block datacenter IP ranges as a matter of policy, and a timeout from
+  an employer's marketing site is not evidence about employment.
+- `Mismatch` — reached it and it disagreed. The only outcome that means
+  something is actually wrong.
+
+Collapsing unreachable into failure would make the feature dishonest in the
+direction that damages its author. Collapsing it into passed would make it
+useless.
+
+## What it cannot do
+
+It checks links and public artifacts. It cannot verify employment, titles, or
+dates, because there is nothing public to check them against.
+
+This has to be stated in the UI copy, not just here. A feature called
+"verified resume" that only checks whether URLs resolve would be the exact kind
+of overclaiming the rest of this project avoids.
+
+## Abuse
+
+A visitor-triggered fan-out of outbound requests is an amplifier pointed at
+third parties who did not opt in.
+
+- `MAX_CHECKS` caps a run.
+- `MIN_REFRESH_SECONDS` plus the run cache means repeated clicks reuse a run.
+- Bounded `MaxConcurrency` on the `Map`, so a run is a trickle rather than a
+  burst.
+- Per-IP rate limiting at the edge on `POST /provenance`.
 
 ## Read model
 
-Each task updates a DynamoDB item keyed by analysis ID with its current step
-and status. `GET /fit/{id}` serves from that item.
+Same rule as everywhere: the projection is written by the tasks and read by the
+page. `DescribeExecution` cannot see mid-flight results and
+`GetExecutionHistory` is not built for page-load traffic.
 
-Reads never touch Step Functions. `DescribeExecution` returns status and input
-with output only after completion, so mid-flight data is invisible;
-`GetExecutionHistory` is paginated, rate-limited, and capped at 25k events.
-Neither is built for per-page-load traffic.
+The projection lives in DynamoDB with a TTL. A lost run costs a visitor a
+re-click, which is the correct amount of durability for this.
 
-## Caching by input hash
+## Progress honesty
 
-The normalized hash is both the cache key and the execution name. Identical
-submissions collide at the service level rather than needing application
-locking. This is the same idempotency approach the publish pipeline uses with
-commit SHAs.
+`CheckRun::progress` caps at 99 while the status is `Running`, even when every
+planned result has arrived. A progress bar that sits at 100% while the page
+still says "checking" reads as broken.
 
-It defends against repetition, not against randomized input, which is what the
-daily ceiling is for.
+## Open
 
-## Matching
-
-`MatchRequirement` retrieves candidate evidence from the resume corpus, then
-asks the model to produce a rationale citing specific entries. The citation is
-structural: the output type holds role slugs and highlight indices, validated
-against the actual document, so a fabricated citation fails deserialization.
-
-Open question: whether retrieval is keyword matching over a small corpus or
-embeddings and vector search. The corpus is one resume. Keyword matching with
-synonym expansion is probably sufficient and far cheaper; embeddings would
-demonstrate more current technique. Decide on merit, not on resume keywords.
-
-## Prompt injection
-
-A pasted job description is untrusted and can contain instructions aimed at the
-extractor. Defense is structural: instructions separated from data, input
-capped, and output validated against the expected shape regardless of what the
-input asked for. An output that fails validation is logged as a possible
-injection attempt, not only as a model error.
-
-Rendered model text is escaped like any user content.
-
-## Open questions
-
-- Which Bedrock model, and the eval set to justify it. Needs a small corpus of
-  real job descriptions with hand-labelled expected extraction.
-- Specific numbers for input cap, rate limit, daily ceiling, monthly budget.
-- Whether the tailored variant is offered as a download only, or also as a
-  shareable link, which would turn an ephemeral analysis into a published
-  artifact with different retention implications.
+- Whether the GitHub check uses the unauthenticated API, which is rate limited
+  per IP and shared across Lambda instances, or a token. Unauthenticated first,
+  with the rate limit treated as `Unreachable`.
+- Whether to show the check plan before running it. Probably yes: it sets
+  expectations about scope and makes the "cannot verify employment" point
+  concrete rather than a disclaimer nobody reads.

@@ -17,23 +17,38 @@ decisions so they do not drift into two places.
 | [3](phase3/) | Public site | Not started |
 | [4](phase4/) | Publishing pipeline | Designed, not started |
 | [5](phase5/) | Enrichment and artifacts | Outlined |
-| [6](phase6/) | Fit analysis (flagship) | Designed, not started |
+| [6](phase6/) | Interactive: provenance check + fit analysis | Built, pending deploy verification |
 | [7](phase7/) | Admin, hardening, operations | Outlined |
 | [8](phase8/) | Polish | Outlined, deliberately thin |
 
 Phases 7 and 8 are outlines on purpose. Designing them before the system exists
 produces documents that get rewritten.
 
+## Sequencing
+
+Numeric order. Phase 4 next.
+
+This reverses an earlier call to run Phase 6 first. That advice assumed the fit
+analysis was a model-backed async workflow carrying the orchestration story.
+Once it became deterministic and synchronous, it stopped being either the
+architectural centerpiece or a multi-day build, so the reason to jump the queue
+evaporated.
+
+Phase 4 is now where the state machine work lives, and it is a better showcase
+than the fit analysis would have been: three genuine fan-outs, heterogeneous
+work, failure modes that actually occur, and an optional human approval gate.
+
 ## Immediate next actions
 
-1. Enable branch protection on `main`. Everything after the initial push goes
-   through pull requests, per the pipeline steering.
-2. Finish Phase 2: commit SHA surfacing and ETags, then derived values. See
-   `phase2/tasks.md`.
-3. Fill the content placeholders listed in `phase0/tasks.md`. Not code work,
-   but the pipeline will refuse to publish while they remain.
-4. Decide open question 7 before starting Phase 4, since it changes what the
-   site handler does.
+1. Deploy and verify Phase 6: trigger a provenance run, confirm the projection
+   fills and an unreachable host reports honestly.
+2. Fill the content placeholders in `phase0/tasks.md`. The fit analysis already
+   demonstrated why this matters: a bracketed Kubernetes placeholder produced a
+   wrong match until the corpus started excluding them.
+3. Alarms on failed executions for both workflows, and per-IP rate limiting on
+   the two POST endpoints.
+4. Enable branch protection on `main` if it is still off.
+5. Then Phase 4, where the publish pipeline turns reads static.
 
 ## Guiding principles
 
@@ -76,7 +91,10 @@ Recorded so they are not relitigated. Reasoning is in the relevant
 | IaC | CDK TypeScript with `cargo-lambda-cdk` |
 | HTTP entry | Function URL behind CloudFront. No API Gateway, no WebSockets |
 | Interactive feature | Job description fit analysis. A career walkthrough was rejected |
-| Flow state | DynamoDB with TTL, read via a projection, never by querying executions |
+| Fit analysis implementation | Deterministic taxonomy and keyword matching, no foundation model, orchestrated as an Express workflow with a four-branch `Parallel` and returned synchronously via `StartSyncExecution` |
+| Provenance check | Standard workflow, `Map` fan-out over external links and repos, async with a polled projection. Genuinely slow and flaky |
+| Two patterns on purpose | Standard plus `Map` plus polling for slow flaky work; Express plus `Parallel` plus sync for fast heterogeneous work. Demonstrating one pattern twice would be worth less than demonstrating two |
+| Flow state | DynamoDB with a TTL, for provenance run projections only. The fit analysis needs none |
 | Region | `us-east-2`, with the CloudFront certificate in `us-east-1` |
 
 ## Open questions
@@ -86,12 +104,24 @@ Recorded so they are not relitigated. Reasoning is in the relevant
 2. Admin UI, or editing entirely through commits and pull requests?
    Git-as-truth points at the latter, which would shrink Phase 7 substantially.
 3. Which external sources feed the enrichment sync, and how often?
-4. Which Bedrock model for requirement extraction, and what does the eval set
-   look like?
-5. Abuse thresholds: input size cap, per-IP rate limit, daily execution
-   ceiling, monthly Bedrock budget. Numbers before launch, not after the first
-   bill.
-6. Domain name and registrar.
+4. ~~Which Bedrock model, and what eval set?~~ Decided: no foundation model.
+   The account has no model access and a $20 budget, and an unauthenticated
+   endpoint billing per token is unbounded by anyone with curl. Both model
+   calls have deterministic equivalents, and the matching one was already
+   built. The trait seam stays so a model is a later addition rather than a
+   rewrite. Choosing not to reach for an LLM where a dictionary suffices is a
+   better maturity signal than the reverse.
+5. ~~Abuse thresholds?~~ Mostly moot. With no per-token cost the amplification
+   risk disappears. The input cap stays because unbounded input is still
+   unbounded work, and edge rate limiting is still worth having.
+6. Staging. The pipeline steering specifies two fully separate stages, `dev`
+   and `prod`, with a SHA promoted rather than rebuilt. Reality is one stack
+   named `rader-resume-dev` that serves the public domain, so the name is
+   actively misleading. Three ways out: rename it to `prod` and add a real
+   `dev` stack on a subdomain, collapse to one stage honestly and amend the
+   steering, or leave it until Phase 4 makes promotion mean something. The
+   cost of a second stage is low, since certificates and distributions have no
+   fixed charge, so this is about whether promotion is worth the ceremony yet.
 7. ~~Pre-rendered artifacts or per-request rendering?~~ Decided: static-first.
    The question was framed as SSR versus a runtime fetch, but for content that
    changes only on commit the real comparison is request-time versus

@@ -1,12 +1,22 @@
 ---
-inclusion: always
+inclusion: manual
 ---
 
 # AI Integration Standards
 
-Scope: LLM calls from Lambda, currently Bedrock, currently the Phase 6 fit
-analysis. These rules exist because model output is untrusted input that costs
-money.
+Status: dormant. Nothing in this project calls a model.
+
+The Phase 6 fit analysis was redesigned as deterministic taxonomy and keyword
+matching after foundation model access proved unavailable and the per-request
+cost on an unauthenticated endpoint was judged a bad risk against the budget.
+
+These rules stand and apply the moment a model call is introduced. Set to
+manual inclusion rather than deleted, because the prompts, schemas, and
+evidence-identifier resolution in `resume-core::fit` already implement them and
+are tested. Pull this in with a context reference when that path is revived.
+
+Original scope: LLM calls from Lambda. These rules exist because model output
+is untrusted input that costs money.
 
 ## Output is a contract
 
