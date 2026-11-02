@@ -16,6 +16,24 @@ use crate::{CareerBreak, ImpreciseDate, Project, Resume, Role, SkillGroup, Timel
 /// render-blocking stylesheet fetch.
 const STYLES: &str = include_str!("styles.css");
 
+/// The stylesheet as inlined, which is the authored CSS plus the diagram's
+/// generated geometry.
+///
+/// One block rather than two, so the policy carries one style hash and is
+/// byte-identical on every page. That matters for the static-artifact target:
+/// a per-page policy would have to be recomputed wherever a page is rendered.
+///
+/// `expect` because the architecture document is embedded at compile time and
+/// a test asserts it parses. A malformed document is a build-time bug, and
+/// failing loudly beats serving a diagram with every node stacked at the
+/// origin.
+static INLINE_STYLES: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let architecture =
+        crate::architecture::load().expect("embedded architecture document must be valid");
+
+    format!("{STYLES}{}", architecture.layout_css())
+});
+
 /// The only script on the site, inlined, and the sole reason `script-src` is
 /// not `'none'`.
 ///
@@ -150,7 +168,7 @@ pub fn content_security_policy() -> String {
         "form-action 'self'".to_owned(),
         "connect-src 'self'".to_owned(),
         "img-src 'self' data:".to_owned(),
-        format!("style-src {}", csp_hash(STYLES)),
+        format!("style-src {}", csp_hash(&INLINE_STYLES)),
         format!("script-src {}", csp_hash(ENHANCEMENT)),
     ]
     .join("; ")
@@ -269,7 +287,7 @@ fn shell(resume: &Resume, ctx: PageContext<'_>, head: Head<'_>, body: Markup) ->
                 @if head.social {
                     (social_meta(resume, ctx))
                 }
-                style { (maud::PreEscaped(STYLES)) }
+                style { (maud::PreEscaped(INLINE_STYLES.as_str())) }
             }
             body {
                 main { (body) }
@@ -637,17 +655,114 @@ pub fn provenance_run(
     )
 }
 
-/// One component in the architecture diagram.
+/// The drawing: hexagon nodes, curved connectors, tier labels.
 ///
-/// The hexagon finally has a job: it marks a thing that runs, rather than
-/// floating in the background as ornament. One element and one rule, so a new
-/// node costs a data entry and no CSS.
+/// Inline SVG with every coordinate computed from the content document. That
+/// distinction matters: the reason the first attempt was ordered bands with no
+/// edges was to avoid hand-positioned coordinates, but the result was boxes on
+/// a page rather than a diagram. A layout function is not hand-positioning.
+///
+/// `aria-hidden`, and not a cop-out: the component list below is the same
+/// information in a form a screen reader can actually navigate, including the
+/// role text and the CloudFormation type that the drawing has no room for.
+/// Describing a diagram twice, once badly, serves nobody.
+fn architecture_svg(layout: &crate::architecture::Layout<'_>) -> Markup {
+    use crate::architecture::Align;
+
+    let view_box = format!("0 0 {:.0} {:.0}", layout.width, layout.height);
+
+    html! {
+        div class="diagram" {
+            // Positions come from the generated rules in the stylesheet, keyed
+            // by these ids. No `style` attributes anywhere: the policy hashes
+            // the style block, which does not cover attributes, and opening
+            // `'unsafe-hashes'` for a diagram would be a bad trade.
+            div class="diagram__frame" {
+                // Connectors only. SVG is the right tool for curves between
+                // computed points and the wrong one for wrapping text, so the
+                // nodes are HTML on top of this.
+                svg
+                    class="diagram__canvas"
+                    viewBox=(view_box)
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                    focusable="false"
+                {
+                    g class="diagram__edges" {
+                        @for connector in &layout.connectors {
+                            path d=(connector.path()) {}
+                        }
+                    }
+                }
+
+                @for tier in &layout.tiers {
+                    span
+                        class="diagram__tier"
+                        id=(format!("tier-{}", tier.id))
+                        aria-hidden="true"
+                    {
+                        (tier.label)
+                    }
+                }
+
+                @for placed in &layout.nodes {
+                    @let describedby = format!("about-{}", placed.node.id);
+
+                    // A button because it is focusable everywhere and a tap
+                    // focuses it, which is what makes the detail reachable
+                    // without a mouse. It performs no action; the popover is
+                    // disclosure, shown on hover and focus alike.
+                    button
+                        type="button"
+                        class={
+                            "diagram__node"
+                            @if placed.node.is_external() { " diagram__node--external" }
+                            @if placed.placement.above { " diagram__node--flip" }
+                            @match placed.placement.align {
+                                Align::Start => " diagram__node--start",
+                                Align::Centre => "",
+                                Align::End => " diagram__node--end",
+                            }
+                        }
+                        id=(format!("node-{}", placed.node.id))
+                        aria-describedby=(describedby)
+                    {
+                        // Not `.hex`: that class carries a fixed inline-size
+                        // for the portrait frame, which overrode this box and
+                        // drew the shape larger than the button, putting the
+                        // caption across the middle of it. The clip-path lives
+                        // in `.diagram__shape` for exactly that reason.
+                        span class="diagram__shape" aria-hidden="true" {}
+                        span class="diagram__label" { (placed.node.label) }
+
+                        span class="diagram__about" id=(describedby) role="tooltip" {
+                            span class="diagram__about-role" { (placed.node.role) }
+                            @match &placed.node.resource_type {
+                                Some(kind) => span class="diagram__about-type" { (kind) },
+                                None => span class="diagram__about-type" {
+                                    "Outside this stack"
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One component in the list beneath the drawing.
+///
+/// This is the authoritative version: it carries the reasoning and the
+/// CloudFormation type, neither of which fits in a hexagon.
 fn architecture_node(node: &Node) -> Markup {
     html! {
         li class={ "node" @if node.is_external() { " node--external" } } {
             div class="hex node__badge" aria-hidden="true" {}
             div class="node__body" {
-                h3 { (node.label) }
+                // h2 Architecture, h3 Components, h4 tier, h5 here. Depth
+                // rather than size: the visual weight comes from CSS.
+                h5 { (node.label) }
                 p { (node.role) }
                 @match &node.resource_type {
                     // The type is the machine-checkable half of the claim, so
@@ -674,13 +789,27 @@ fn architecture_diagram(architecture: &Architecture) -> Markup {
             h2 { "Architecture" }
             p class="lede" { (architecture.summary) }
 
-            ol class="tiers" {
-                @for tier in &architecture.tiers {
-                    li class="tier" {
-                        h3 class="tier__label" { (tier.label) }
-                        ul class="nodes" {
-                            @for node in &tier.nodes {
-                                (architecture_node(node))
+            (architecture_svg(&architecture.layout()))
+
+            p class="meta" {
+                "Hover or focus any component for what it does and the "
+                "CloudFormation type it deploys as."
+            }
+
+            // Collapsed, so the page leads with the drawing rather than a wall
+            // of text, but the detail is still one click away and reads
+            // linearly. Print styles reveal it regardless of state, because a
+            // printed page has no hover and no disclosure triangle.
+            details class="components" {
+                summary { "Component reference" }
+                ol class="tiers" {
+                    @for tier in &architecture.tiers {
+                        li class="tier" {
+                            h4 class="tier__label" { (tier.label) }
+                            ul class="nodes" {
+                                @for node in &tier.nodes {
+                                    (architecture_node(node))
+                                }
                             }
                         }
                     }
@@ -1163,10 +1292,15 @@ mod tests {
     fn the_policy_authorizes_exactly_what_the_document_inlines() {
         let policy = content_security_policy();
 
-        // The hashes are computed from the same constants the template
-        // inlines, so this proves the two cannot drift. A wrong script hash
-        // means the modal silently stops opening.
-        assert!(policy.contains(&csp_hash(STYLES)));
+        // The hashes are computed from the same strings the template inlines,
+        // so this proves the two cannot drift. A wrong script hash means the
+        // modal silently stops opening; a wrong style hash means an unstyled
+        // page.
+        //
+        // Hashing `INLINE_STYLES` rather than `STYLES`: the inlined block is
+        // the authored CSS plus the diagram's generated geometry, and the
+        // policy has to cover what is actually in the document.
+        assert!(policy.contains(&csp_hash(&INLINE_STYLES)));
         assert!(policy.contains(&csp_hash(ENHANCEMENT)));
 
         // Closed by default, and no blanket escape hatch anywhere.
@@ -1267,6 +1401,91 @@ mod tests {
         // Manifests verbatim, not summarized.
         assert!(html.contains("[workspace.dependencies]"));
         assert!(html.contains("aws-cdk-lib"));
+    }
+
+    #[test]
+    fn the_architecture_renders_as_a_drawing_not_a_list_of_boxes() {
+        let resume = load().unwrap();
+        let architecture = crate::architecture::load().unwrap();
+        let layout = architecture.layout();
+        let html = stack_page(&resume, CTX, &architecture).into_string();
+
+        // A real drawing: a canvas, a hexagon per component, and a connector
+        // per edge. The first version of this page had nodes and no edges,
+        // which is a list with borders rather than a diagram.
+        assert!(html.contains("<svg"));
+        assert_eq!(html.matches("<path").count(), layout.connectors.len());
+        assert!(layout.connectors.len() > 10, "a diagram needs edges");
+
+        // A node per component, each focusable so its detail is reachable
+        // without a pointer, and each pointing at its own description.
+        assert_eq!(
+            html.matches(r#"class="diagram__node"#).count(),
+            layout.nodes.len()
+        );
+        for placed in &layout.nodes {
+            assert!(html.contains(&format!(r#"id="node-{}""#, placed.node.id)));
+            assert!(html.contains(&format!(r#"aria-describedby="about-{}""#, placed.node.id)));
+        }
+
+        // Scales rather than being pinned to one width.
+        assert!(html.contains("viewBox="));
+    }
+
+    #[test]
+    fn every_component_detail_is_reachable_without_hover() {
+        let resume = load().unwrap();
+        let architecture = crate::architecture::load().unwrap();
+        let html = stack_page(&resume, CTX, &architecture).into_string();
+
+        // Hover-only disclosure is unreachable by keyboard, by touch, and by
+        // a screen reader. The text is in the document and associated with a
+        // focusable control, so hover is an accelerator rather than the only
+        // way in.
+        for node in architecture.nodes() {
+            assert!(
+                html.contains(&node.role),
+                "{} explains itself only on hover",
+                node.id
+            );
+        }
+
+        // And it still reads linearly for print and for anyone who would
+        // rather scan a list than poke at a drawing.
+        assert!(html.contains("Component reference"));
+    }
+
+    #[test]
+    fn the_diagram_positions_itself_without_inline_styles() {
+        let resume = load().unwrap();
+        let architecture = crate::architecture::load().unwrap();
+        let html = stack_page(&resume, CTX, &architecture).into_string();
+
+        // The policy hashes the style block, which does not cover `style=`
+        // attributes. Positioning with them would have needed
+        // `'unsafe-hashes'`, so the geometry is generated into the stylesheet
+        // instead and covered by the same hash.
+        assert!(!html.contains("style=\""));
+        assert!(content_security_policy().contains(&csp_hash(&INLINE_STYLES)));
+
+        // The generated rules are really there, keyed to the component ids.
+        let css = architecture.layout_css();
+        assert!(css.contains("#node-site-handler{left:"));
+        assert!(css.contains(".diagram__frame{aspect-ratio:"));
+        assert!(INLINE_STYLES.contains(&css));
+    }
+
+    #[test]
+    fn the_drawing_carries_no_hard_coded_colour() {
+        let resume = load().unwrap();
+        let architecture = crate::architecture::load().unwrap();
+        let svg = stack_page(&resume, CTX, &architecture).into_string();
+
+        // Fills and strokes come from the stylesheet, so the drawing themes
+        // with the rest of the site and prints light without a second code
+        // path. A literal hex here would be invisible to both.
+        assert!(!svg.contains("fill=\"#"));
+        assert!(!svg.contains("stroke=\"#"));
     }
 
     #[test]

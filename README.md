@@ -163,6 +163,8 @@ GIT_SHA=$(git rev-parse HEAD) \
 BUILD_MONTH=$(date -u +%Y-%m) \
 SITE_URL=https://rader-resume.com \
   cargo run -p site-handler
+  cargo run -p gen-ai-handler
+
 ```
 
 `build.rs` declares these as rebuild triggers, so changing one forces a

@@ -1,0 +1,158 @@
+{
+  "schemaVersion": 1,
+  "id": "policy-assistant",
+  "name": "EU policy assistant",
+  "summary": "Cited answers from policies that change weekly, inside the EU, with three departments that must not see each other's documents.",
+  "brief": {
+    "whoIsAsking": "An employee at a European manufacturer of about 4,000 people, asking how many weeks of parental leave apply in Germany, whether a customer name may go in a ticket, or what the security standard says about USB drives.",
+    "whatTheyNeedBack": "An answer that names the file and the section it came from. A fluent paraphrase with no citation is not an answer they can act on.",
+    "systemsAlreadyRunning": "HR, legal, and security keep their policies as PDFs. Legal edits a policy most weeks. The assistant is only reachable from the company network, and document text, embeddings, and the model call may not leave the EU.",
+    "breaksWhen": "An answer is fluent, plausible, and sourced from a policy that was superseded in February. One of those retires the assistant, because nobody can then tell which of the correct answers were also stale.",
+    "doneMeans": "An HR employee gets a cited answer from the current HR corpus, a security employee retrieves nothing from the HR-only documents, and a prompt that drops citation quality does not publish."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "eu", "label": "EU Region" },
+          { "id": "vpc", "label": "VPC" }
+        ],
+        "nodes": [
+          {
+            "id": "network",
+            "label": "Company network",
+            "flowsTo": ["gateway"]
+          },
+          {
+            "id": "gateway",
+            "label": "API Gateway",
+            "group": "eu",
+            "flowsTo": ["lambda"]
+          },
+          {
+            "id": "lambda",
+            "label": "AWS Lambda",
+            "group": "vpc",
+            "flowsTo": ["bedrock", "knowledgebase"]
+          },
+          {
+            "id": "role",
+            "label": "IAM role",
+            "group": "vpc"
+          },
+          {
+            "id": "bedrock",
+            "label": "Amazon Bedrock",
+            "group": "eu"
+          },
+          {
+            "id": "knowledgebase",
+            "label": "Bedrock Knowledge Bases",
+            "group": "eu",
+            "flowsTo": ["corpus"]
+          },
+          {
+            "id": "corpus",
+            "label": "Amazon S3",
+            "group": "eu"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Retrieve, then Converse",
+      "decision": "Whether the policy text belongs in the weights or behind a retrieval call, and which client each half of that call uses.",
+      "why": "The policy PDF changes most weeks and the answer has to cite that file. Training freezes a wording: a model trained in January is still quoting the old leave rules in March, and it cannot tell you which file it learned them from. Fine-tuning is the right call when the behaviour is wrong, not when the facts move. Retrieve lives on bedrock-agent-runtime; Converse does not. Two planes, two clients, and sending one to the other's address fails with an error that reads like a bad request rather than a wrong destination.",
+      "snippets": [
+        {
+          "label": "Two clients. Retrieve is on the agent runtime; Converse is not.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nQUESTION = \"How many weeks of parental leave apply in Germany?\""
+        },
+        {
+          "label": "Retrieve the policy chunks, and the file each came from.",
+          "language": "python",
+          "source": "found = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n)\n\nfor chunk in found[\"retrievalResults\"]:\n    print(chunk[\"location\"][\"s3Location\"][\"uri\"])\n\ncontext = \"\\n\\n\".join(c[\"content\"][\"text\"] for c in found[\"retrievalResults\"])"
+        },
+        {
+          "label": "Converse on bedrock-runtime. The eu. prefix keeps inference in the EU, and maxTokens is set because an unset cap is how one turn becomes the bill.",
+          "language": "python",
+          "source": "reply = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[\n        {\n            \"role\": \"user\",\n            \"content\": [{\"text\": f\"{context}\\n\\nQuestion: {QUESTION}\"}],\n        }\n    ],\n    inferenceConfig={\"maxTokens\": 512},\n)\n\nprint(reply[\"stopReason\"])\nprint(reply[\"output\"][\"message\"][\"content\"][0][\"text\"])"
+        }
+      ],
+      "infrastructure": "// Retrieval is a knowledge base, not a training job. Nothing here\n// provisions a customization.\nconst corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the call here from the snippets on the left, then Run.\n#\n# The goal: retrieve from the HR knowledge base, then answer the question\n# with Converse, printing the cited file and the reply.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Once the call runs, try breaking it. Each mistake fails differently, and\nthe exception name is the lesson:\n\n1. Drop `modelId` from the Converse call. It is the one required parameter,\n   so botocore rejects the call before it leaves the machine with a\n   ParamValidationError.\n2. Now drop `inferenceConfig` instead, keeping `modelId`. This one does NOT\n   fail: maxTokens is optional, the call is accepted, and an unbounded\n   response is how one turn becomes the bill. The dangerous mistake is the\n   one with no error.\n3. Send Converse to the agent client (`agent.converse(...)`) instead of the\n   runtime client. The agent client has no converse method, so this is an\n   AttributeError in Python, before any request.\n\nA note on what this sandbox cannot show: a `global.` model-id prefix, or any\nother residency or policy violation, is validated server-side at AWS. The\ntransport here is intercepted and never reaches a server, so those calls\nsucceed in the lab even though real AWS would reject them. The sandbox teaches\nrequest shape and client-side validation, not service-side policy.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "Retrieve",
+            "body": {
+              "retrievalResults": [
+                {
+                  "content": {
+                    "text": "Parental leave in Germany: employees are entitled to up to 156 weeks of Elternzeit per child, which may be taken until the child's eighth birthday. Up to 24 months may be deferred."
+                  },
+                  "location": {
+                    "type": "S3",
+                    "s3Location": {
+                      "uri": "s3://policy-corpus-eu/hr/parental-leave-de-v7.pdf"
+                    }
+                  },
+                  "score": 0.82
+                }
+              ]
+            }
+          },
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "text": "German employees may take up to 156 weeks of Elternzeit per child, up to the child's eighth birthday, with up to 24 months deferrable. Source: hr/parental-leave-de-v7.pdf."
+                    }
+                  ]
+                }
+              },
+              "stopReason": "end_turn",
+              "usage": {
+                "inputTokens": 412,
+                "outputTokens": 58,
+                "totalTokens": 470
+              }
+            }
+          }
+        ],
+        "reasons": [
+          {
+            "onException": "ParamValidationError",
+            "whenMessageContains": "modelId",
+            "prose": "modelId is the one required parameter on Converse, so botocore stops this before it leaves the machine, the cheapest place to catch it. Note the contrast with inferenceConfig, which is optional: dropping that raises nothing, and an unbounded response is the cost mistake no exception warns you about."
+          },
+          {
+            "onException": "AttributeError",
+            "whenMessageContains": "converse",
+            "prose": "The agent client has no converse method at all, so this fails as a plain AttributeError before any request is built. Converse lives on bedrock-runtime; Retrieve on bedrock-agent-runtime. Two planes, two clients. The lesson is that the wrong client is wrong in Python, not at the service."
+          }
+        ]
+      }
+    }
+  ]
+}

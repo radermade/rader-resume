@@ -38,6 +38,30 @@ jobs:
           npm ci
           npx tsc --noEmit
 
+      # The core crates own the domain and the rendering; the handlers own the
+      # edge. That layering is a doc comment until something enforces it, and
+      # the thing it buys is a real option: neither crate pulls a dependency
+      # that cannot compile to wasm32, so moving rendering or checking into
+      # the browser stays possible. An aws-sdk in either one closes that door
+      # silently.
+      - name: Core crates stay portable
+        run: |
+          ! cargo tree -p resume-core -e normal | grep -qE 'aws-sdk-|lambda_'
+          ! cargo tree -p gen-ai-core -e normal | grep -qE 'aws-sdk-|lambda_'
+
+      # The GenAI lab worker is JS-generating-Python-in-a-worker that no Rust
+      # test can exercise: it only fails at runtime under Pyodide. This vendors
+      # the runtime and runs the shipped worker.js intercept end to end — the
+      # call runs through the intercept, completion resolves against live
+      # boto3, a wrong call raises a real exception. It catches the class of
+      # runtime bug (ssl, credentials, install path, intercept keying, response
+      # stream) that otherwise surfaces only in a browser. Vendoring fetches
+      # from the Pyodide CDN and PyPI; the pins make it reproducible.
+      - name: GenAI workbench smoke test
+        run: |
+          node assets/gen-ai/vendor-pyodide.mjs
+          node assets/gen-ai/smoke-test.mjs
+
       # The architecture document's own invariants (schema version, unique
       # ids, no placeholders, well-formed CloudFormation types) are covered by
       # `cargo test` above. Cross-checking it against the real stacks needs a
@@ -76,6 +100,15 @@ jobs:
         run: |
           export BUILD_MONTH="$(date -u +%Y-%m)"
           npm ci
+
+          # Vendor the Pyodide runtime and the lab's wheels onto disk before
+          # synth. The lab's asset bucket deployment reads
+          # assets/gen-ai/pyodide/ at synth time, and the binaries are
+          # gitignored, so this is where they are produced. Fetches from the
+          # Pyodide CDN and PyPI once per run; the pinned version and the
+          # committed WHEELS list plus lockfile are what make it reproducible.
+          # Run from the repo root, not infra/.
+          node ../assets/gen-ai/vendor-pyodide.mjs
 
           # Synthesize once, then deploy from that assembly. The architecture
           # check needs a real assembly to compare against, and synthesizing

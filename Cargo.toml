@@ -9,6 +9,7 @@ publish = false
 
 [workspace.dependencies]
 check-runner = { path = "crates/check-runner" }
+gen-ai-core = { path = "crates/gen-ai-core" }
 resume-core = { path = "crates/resume-core" }
 run-store = { path = "crates/run-store" }
 

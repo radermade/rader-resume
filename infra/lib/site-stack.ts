@@ -13,7 +13,7 @@ import {
   SecurityPolicyProtocol,
   ViewerProtocolPolicy,
 } from 'aws-cdk-lib/aws-cloudfront';
-import { FunctionUrlOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
+import { FunctionUrlOrigin, S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import { Architecture, FunctionUrlAuthType } from 'aws-cdk-lib/aws-lambda';
 import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { AaaaRecord, ARecord, HostedZone, RecordTarget } from 'aws-cdk-lib/aws-route53';
@@ -25,6 +25,7 @@ import { EmailSubscription } from 'aws-cdk-lib/aws-sns-subscriptions';
 import { RustFunction } from 'cargo-lambda-cdk';
 import { Construct } from 'constructs';
 import { FitWorkflow } from './fit-workflow';
+import { GenAiLab } from './gen-ai-lab';
 import { ProvenanceWorkflow } from './provenance-workflow';
 
 export interface SiteStackProps extends StackProps {
@@ -53,6 +54,10 @@ export class SiteStack extends Stack {
     });
 
     const fit = new FitWorkflow(this, 'Fit', { stage: props.stage });
+
+    // A second binary on this distribution. The resume's routes, palette, and
+    // policy are untouched; the lab owns its own.
+    const lab = new GenAiLab(this, 'GenAiLab', { stage: props.stage });
 
     // Checks resolve this site's own artifacts against its public origin, so
     // without a domain there is nothing meaningful to check them against.
@@ -106,6 +111,8 @@ export class SiteStack extends Stack {
 
     const alarms: Alarm[] = [
       fit.failedExecutions,
+      lab.errors,
+      lab.throttles,
       ...(provenance ? [provenance.failedExecutions] : []),
       // The handler erroring or being throttled is invisible to the workflow
       // alarms, since it is what calls them.
@@ -197,6 +204,60 @@ export class SiteStack extends Stack {
       compress: true,
     };
 
+    const labOrigin = new FunctionUrlOrigin(lab.url);
+
+    // Same settings, different origin: the lab is its own function. POST is
+    // allowed because advancing a step is a form post, and caching is
+    // disabled because a step response is derived from the posted body.
+    const labBehavior = {
+      ...dynamic,
+      origin: labOrigin,
+    };
+
+    // The lab's workbench assets are content-hashed and immutable. A long TTL
+    // is safe because the filename changes when the bytes do, so the cache
+    // never serves a stale asset. GET only: an asset is read, never posted.
+    const immutableCache = new CachePolicy(this, 'LabAssetCache', {
+      defaultTtl: Duration.days(365),
+      minTtl: Duration.days(365),
+      maxTtl: Duration.days(365),
+      enableAcceptEncodingGzip: true,
+      enableAcceptEncodingBrotli: true,
+      headerBehavior: CacheHeaderBehavior.none(),
+      cookieBehavior: CacheCookieBehavior.none(),
+      queryStringBehavior: CacheQueryStringBehavior.none(),
+    });
+
+    const labAssets = {
+      origin: labOrigin,
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+      cachePolicy: immutableCache,
+      originRequestPolicy,
+      compress: true,
+    };
+
+    // The large runtime (Pyodide core, the wheels) is served from the lab's
+    // S3 bucket with OAC, not the Lambda: it is multi-megabyte and binary, so
+    // it does not belong in the function. The bucket keeps the whole payload
+    // on this origin, so the workbench policy stays `'self'` with no CDN.
+    //
+    // `originPath` strips the `/gen-ai/assets/pyodide` request prefix so the
+    // S3 key is just `pyodide/...`, matching the BucketDeployment prefix. OAC
+    // and the read grant are created by this origin helper; the bucket itself
+    // stays private with public access blocked.
+    const labRuntimeOrigin = S3BucketOrigin.withOriginAccessControl(lab.assetBucket, {
+      originPath: '/gen-ai/assets',
+    });
+
+    const labRuntime = {
+      origin: labRuntimeOrigin,
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+      cachePolicy: immutableCache,
+      compress: true,
+    };
+
     const distribution = new Distribution(this, 'Cdn', {
       comment: `${props.domainName} (${props.stage})`,
       domainNames: [props.domainName, `www.${props.domainName}`],
@@ -219,6 +280,23 @@ export class SiteStack extends Stack {
         '/provenance': dynamic,
         '/provenance/*': dynamic,
         '/api/build': dynamic,
+        // Both patterns, because CloudFront patterns are exact unless
+        // wildcarded. `/gen-ai` alone would send `/gen-ai/policy-assistant`
+        // to the read-only default, which allows only GET and HEAD, and
+        // Previous and Next are posts: navigation would work locally and
+        // fail at the edge. That is the trap `/fit/fragment` hit.
+        // Assets first: a more specific pattern has to be ordered ahead of
+        // the catch-all, or the immutable cache never applies and the runtime
+        // is refetched on every visit. And within the asset paths, the
+        // runtime prefix is more specific still and goes to S3, so it must
+        // precede the Lambda-served `/gen-ai/assets/*`. CloudFront matches in
+        // list order with no specificity sort, so this ordering is the rule,
+        // not a hint: pyodide to the bucket, the small scripts to the Lambda,
+        // everything else under the lab to the handler.
+        '/gen-ai/assets/pyodide/*': labRuntime,
+        '/gen-ai/assets/*': labAssets,
+        '/gen-ai': labBehavior,
+        '/gen-ai/*': labBehavior,
       },
       priceClass: PriceClass.PRICE_CLASS_100,
       httpVersion: HttpVersion.HTTP2_AND_3,

@@ -996,6 +996,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gen-ai-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "maud",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "gen-ai-handler"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "gen-ai-core",
+ "lambda_http",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
