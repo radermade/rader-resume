@@ -68,8 +68,82 @@ pub const NAV: Asset = Asset {
     body: include_str!("../../../assets/gen-ai/nav.js"),
 };
 
-/// Every asset, for the handler to serve.
-pub const ALL: &[&Asset] = &[&WORKBENCH, &WORKER, &NAV];
+/// The architecture-diagram icons, embedded like the scripts.
+///
+/// These are small SVGs, so they embed as text the same way the scripts do,
+/// served content-hashed from the lab origin. They are the official AWS
+/// Architecture Icons in production; the repo ships placeholders until the
+/// toolkit is vendored (see `assets/gen-ai/icons/README.md`), so the diagram
+/// renders and the mechanism is testable without redistributing AWS assets.
+///
+/// A scenario's `DiagramNode.icon` holds the key (the stem below). The
+/// renderer maps the key to the icon's content-hashed URL via `icon_url`, so
+/// the markup references a stable key and the URL carries the hash.
+pub const ICONS: &[(&str, Asset)] = &[
+    (
+        "lambda",
+        Asset {
+            name: "icon-lambda.svg",
+            content_type: "image/svg+xml",
+            body: include_str!("../../../assets/gen-ai/icons/lambda.svg"),
+        },
+    ),
+    (
+        "s3",
+        Asset {
+            name: "icon-s3.svg",
+            content_type: "image/svg+xml",
+            body: include_str!("../../../assets/gen-ai/icons/s3.svg"),
+        },
+    ),
+    (
+        "api-gateway",
+        Asset {
+            name: "icon-api-gateway.svg",
+            content_type: "image/svg+xml",
+            body: include_str!("../../../assets/gen-ai/icons/api-gateway.svg"),
+        },
+    ),
+    (
+        "bedrock",
+        Asset {
+            name: "icon-bedrock.svg",
+            content_type: "image/svg+xml",
+            body: include_str!("../../../assets/gen-ai/icons/bedrock.svg"),
+        },
+    ),
+    (
+        "iam",
+        Asset {
+            name: "icon-iam.svg",
+            content_type: "image/svg+xml",
+            body: include_str!("../../../assets/gen-ai/icons/iam.svg"),
+        },
+    ),
+];
+
+/// The content-hashed URL for an icon key, or `None` if the key is unknown.
+///
+/// An unknown key renders no icon rather than a broken image: the diagram node
+/// falls back to its caption alone, which is why `DiagramNode.icon` stays
+/// optional and a scenario can name a product that has no icon yet.
+pub fn icon_url(key: &str) -> Option<String> {
+    ICONS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map(|(_, asset)| asset.url())
+}
+
+/// Every asset, for the handler to serve: the scripts plus every icon.
+pub fn all() -> Vec<&'static Asset> {
+    let mut assets: Vec<&'static Asset> = vec![&WORKBENCH, &WORKER, &NAV];
+    assets.extend(ICONS.iter().map(|(_, asset)| asset));
+    assets
+}
+
+/// The scripts only, kept for callers that want the stable script set. Icons
+/// are looked up by key via `icon_url` and served through `by_url`.
+pub const SCRIPTS: &[&Asset] = &[&WORKBENCH, &WORKER, &NAV];
 
 /// Finds an asset by its content-hashed path.
 ///
@@ -77,7 +151,7 @@ pub const ALL: &[&Asset] = &[&WORKBENCH, &WORKER, &NAV];
 /// URL rather than parsing the hash, so a request for an old hash is a clean
 /// miss rather than a stale serve.
 pub fn by_url(path: &str) -> Option<&'static Asset> {
-    ALL.iter().copied().find(|asset| asset.url() == path)
+    all().into_iter().find(|asset| asset.url() == path)
 }
 
 #[cfg(test)]

@@ -35,11 +35,34 @@ pub enum ScenarioError {
         title: String,
         path: String,
     },
-    #[error("scenario {id} step '{title}' intercepts no response, so nothing it runs can answer")]
-    NoResponses { id: String, title: String },
+    #[error(
+        "scenario {id} step '{title}' is a configuration step with no checks, so nothing verifies the assembled artifact"
+    )]
+    ConfigStepHasNoChecks { id: String, title: String },
     #[error("scenario {id} step '{title}' shows no snippets, so there is nothing to assemble")]
     NoSnippets { id: String, title: String },
+    #[error(
+        "scenario {id} step '{title}' has a snippet in an unknown language '{language}'; the renderer only labels python, shell, and typescript"
+    )]
+    UnknownSnippetLanguage {
+        id: String,
+        title: String,
+        language: String,
+    },
+    #[error(
+        "scenario {id} step '{title}' is runnable and opens the python file {open}, but none of its snippets are python, so there is nothing to assemble and run"
+    )]
+    RunnableStepHasNoPython {
+        id: String,
+        title: String,
+        open: String,
+    },
 }
+
+/// The languages the renderer knows how to label. A snippet in anything else
+/// is an authoring typo (`py`, `ts`) that would render an unlabelled or
+/// mislabelled chip, so parsing rejects it.
+const KNOWN_SNIPPET_LANGUAGES: [&str; 3] = ["python", "shell", "typescript"];
 
 /// The job a scenario puts you inside.
 ///
@@ -133,9 +156,48 @@ pub struct Workbench {
     pub files: Vec<SeedFile>,
     /// Which seeded file the editor opens on. The one the visitor writes into.
     pub open: String,
+    /// What the intercepted transport returns, keyed by operation.
+    ///
+    /// Empty for a configuration step — one whose lesson is a CDK or config
+    /// artifact to read and assemble, not a live AWS call. Not every teaching
+    /// step is a runnable call: chunking strategy, an IAM policy, a
+    /// PrivateLink endpoint are decisions you configure, and forcing a fake
+    /// response onto them would be dishonest. A step with responses runs
+    /// against the intercept; a step without is config. The `is_runnable`
+    /// helper is the one place that distinction is read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub responses: Vec<Intercepted>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<Reason>,
+    /// Structural checks for a configuration step, run in the browser when the
+    /// visitor presses Run on a step that has no live call.
+    ///
+    /// A config step seeds a CDK or config artifact to assemble, and the
+    /// sandbox cannot deploy it to tell you it is right. These checks are the
+    /// answer key: each asserts the assembled text must, or must not, contain
+    /// a pattern, with a message explaining the decision. The absence checks
+    /// carry half the lessons — no fine-tune job, no wildcard IAM — which a
+    /// 'does it contain' test alone cannot express.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Check>,
+}
+
+/// One structural check over the assembled artifact.
+///
+/// `pattern` is matched as a plain substring (case-sensitive), which is enough
+/// for assembled snippets: the visitor is composing provided pieces, so the
+/// check confirms the right pieces are present in the right shape rather than
+/// parsing a language. `present` says whether the pattern must appear
+/// (`true`) or must be absent (`false`). `message` is shown pass or fail, so
+/// the reasoning is visible either way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Check {
+    pub pattern: String,
+    /// Must the pattern be present (`true`) or absent (`false`)?
+    pub present: bool,
+    /// The decision this check verifies, shown whether it passes or fails.
+    pub message: String,
 }
 
 /// A call step: one decision, with its three panes and its environment.
@@ -153,6 +215,20 @@ pub struct CallStep {
     /// CDK for the same step, in the dialect `infra/` uses.
     pub infrastructure: String,
     pub workbench: Workbench,
+}
+
+impl CallStep {
+    /// Whether this step runs a live AWS call against the intercept.
+    ///
+    /// A runnable step has intercepted responses and teaches by running the
+    /// assembled call. A configuration step has none: its lesson is the CDK or
+    /// config artifact in the editor, read and assembled, with nothing to send
+    /// to a transport. The renderer uses this to label the run affordance, and
+    /// the lib tests use it to apply response-reachability only where it means
+    /// something.
+    pub fn is_runnable(&self) -> bool {
+        !self.workbench.responses.is_empty()
+    }
 }
 
 /// The architecture drawing on step 1.
@@ -317,8 +393,15 @@ impl Scenario {
                 });
             }
 
-            if bench.responses.is_empty() {
-                return Err(ScenarioError::NoResponses {
+            // A configuration step legitimately has no responses, but it must
+            // give feedback some other way: it carries checks that verify the
+            // assembled artifact. A config step with neither responses nor
+            // checks is the worksheet-with-no-answer-key the design forbids —
+            // the visitor assembles something and learns nothing about whether
+            // it is right. A runnable step gets its feedback from running, so
+            // it needs no checks.
+            if call.workbench.responses.is_empty() && call.workbench.checks.is_empty() {
+                return Err(ScenarioError::ConfigStepHasNoChecks {
                     id: scenario.id.clone(),
                     title: call.title.clone(),
                 });
@@ -328,6 +411,37 @@ impl Scenario {
                 return Err(ScenarioError::NoSnippets {
                     id: scenario.id.clone(),
                     title: call.title.clone(),
+                });
+            }
+
+            // Every snippet language must be one the renderer can label. A
+            // typo like `py` or `ts` would render a wrong or missing chip, and
+            // the chip is now how a visitor tells an assemble-this snippet from
+            // a reference one.
+            for snippet in &call.snippets {
+                if !KNOWN_SNIPPET_LANGUAGES.contains(&snippet.language.as_str()) {
+                    return Err(ScenarioError::UnknownSnippetLanguage {
+                        id: scenario.id.clone(),
+                        title: call.title.clone(),
+                        language: snippet.language.clone(),
+                    });
+                }
+            }
+
+            // A runnable step opens a python file and the visitor assembles the
+            // python snippets into it. If none of its snippets are python there
+            // is nothing valid to run — the step-9 failure in the limit, where
+            // the only runnable snippet was crowded out by a CDK one. A config
+            // step opens a stack.ts and assembles typescript, so this applies
+            // only to runnable steps.
+            if call.is_runnable()
+                && bench.open.ends_with(".py")
+                && !call.snippets.iter().any(|s| s.language == "python")
+            {
+                return Err(ScenarioError::RunnableStepHasNoPython {
+                    id: scenario.id.clone(),
+                    title: call.title.clone(),
+                    open: bench.open.clone(),
                 });
             }
         }

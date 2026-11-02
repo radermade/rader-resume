@@ -73,6 +73,28 @@ function enhance() {
     }
 
     lesson.innerHTML = fragment;
+
+    // Re-sync the persistent workbench to the new step. The swap replaces only
+    // the lesson, so without this the workbench beside it still holds the
+    // previous step's seed files, checks, and runnable flag — the config-step
+    // Check would grade against the wrong answer key. The fragment carries the
+    // new step's payload under `#lab-step-data`; hand it to the mounted
+    // workbench, which re-seeds its files and checks without tearing down an
+    // already-booted runtime.
+    const stepData = lesson.querySelector('#lab-step-data');
+    if (stepData && window.__labWorkbench && typeof window.__labWorkbench.resync === 'function') {
+      try {
+        window.__labWorkbench.resync(JSON.parse(stepData.textContent));
+      } catch (err) {
+        // A malformed payload should fall back to a full navigation rather
+        // than leave a mismatched workbench in place.
+        // eslint-disable-next-line no-console
+        console.error('[nav] workbench resync failed, navigating', err);
+        form.submit();
+        return;
+      }
+    }
+
     // Focus the new region so a keyboard user is not stranded on a button
     // that was just replaced.
     lesson.setAttribute('tabindex', '-1');

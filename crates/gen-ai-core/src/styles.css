@@ -264,6 +264,41 @@ pre {
   tab-size: 2;
 }
 
+.lab-snippet {
+  margin-block-end: var(--lab-space-4);
+}
+
+/* The language of each snippet, shown so a visitor knows what they are
+   reading before they paste it. A monospace chip ahead of the label. */
+.lab-snippet__lang {
+  display: inline-block;
+  margin-inline-end: var(--lab-space-2);
+  padding: 0 var(--lab-space-2);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--lab-text-muted);
+}
+
+/* A snippet shown for context in a runnable step that is not the editor's
+   language: the shell sidecar beside a PDF, a CDK trigger. Dimmed and marked
+   so it is not assembled into the .py file and run. This is the structural
+   guard against the step-9 failure, where a CDK snippet pasted into a Python
+   editor raised a SyntaxError on Run. */
+.lab-snippet--reference .lab-code {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
+.lab-snippet__ref {
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  color: var(--lab-text-muted);
+}
+
 .lab-nav {
   display: flex;
   gap: var(--lab-space-3);
@@ -363,6 +398,15 @@ pre {
   background-color: var(--lab-raised);
   border: 1px solid var(--lab-code);
   border-radius: var(--lab-radius);
+}
+
+/* The product icon sits inside the node box, filling most of it. Decorative:
+   the caption below is the label, so this is aria-hidden in the markup. Sized
+   by this class, not an inline style, so the hashed-stylesheet CSP rule holds. */
+.lab-node__icon {
+  inline-size: 70%;
+  block-size: 70%;
+  object-fit: contain;
 }
 
 .lab-node__caption {

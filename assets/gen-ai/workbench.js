@@ -65,6 +65,13 @@ class Workbench {
     // hold the worker URL separately.
     this.data = data.workbench;
     this.workerUrl = data.workerUrl;
+    // A configuration step seeds a CDK/config artifact to assemble, not Python
+    // to run. When false, there is no Pyodide and no CLI; instead Run checks
+    // the assembled artifact against `checks` — the step's answer key — so the
+    // visitor gets real feedback on whether they assembled it correctly.
+    // Default true for safety if the flag is missing.
+    this.runnable = data.runnable !== false;
+    this.checks = data.checks || [];
     this.worker = null;
     this.ready = false;
     this.openPath = this.data.open;
@@ -73,6 +80,34 @@ class Workbench {
     this.completionSeq = 0;
     this.completion = null;
     this.completionTimer = null;
+    this.render();
+  }
+
+  /** Re-point the workbench at a new step after the nav script swaps the
+   *  lesson. The swap replaces only the lesson region, so this is what keeps
+   *  the workbench beside it from grading a config step against the previous
+   *  step's answer key or showing a stale seed file.
+   *
+   *  A booted runtime is torn down: seed files, the intercept's responses, and
+   *  the runnable/config distinction are all per-step, so the worker from the
+   *  old step cannot be reused for the new one. render() reboots it when the
+   *  new step is runnable. The reboot cost falls only between two runnable
+   *  steps; config-to-anything never had a worker to lose. */
+  resync(data) {
+    if (this.worker) {
+      try {
+        this.worker.terminate();
+      } catch {
+        // Already gone; nothing to do.
+      }
+      this.worker = null;
+    }
+    this.ready = false;
+    if (this.menu) this.closeCompletions();
+    this.data = data.workbench;
+    this.runnable = data.runnable !== false;
+    this.checks = data.checks || [];
+    this.openPath = this.data.open;
     this.render();
   }
 
@@ -148,49 +183,68 @@ class Workbench {
 
     editor.appendChild(wrap);
 
-    const runBtn = document.createElement('button');
-    runBtn.type = 'button';
-    runBtn.className = 'lab-run';
-    runBtn.textContent = 'Run';
-    runBtn.addEventListener('click', () => this.run());
-
-    const stopBtn = document.createElement('button');
-    stopBtn.type = 'button';
-    stopBtn.className = 'lab-stop';
-    stopBtn.textContent = 'Stop';
-    stopBtn.disabled = true;
-    stopBtn.addEventListener('click', () => this.stop());
-    this.stopBtn = stopBtn;
-
-    editor.appendChild(runBtn);
-    editor.appendChild(stopBtn);
-
     this.output = output;
-    this.output.textContent = 'Loading the runtime…';
 
-    // CLI: one line, mapped onto the same intercepted client.
-    cli.innerHTML = '';
-    const form = document.createElement('form');
-    form.className = 'lab-cli__form';
-    const prompt = document.createElement('span');
-    prompt.className = 'lab-cli__prompt';
-    prompt.textContent = 'aws';
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'lab-cli__input';
-    input.setAttribute('aria-label', 'AWS CLI call');
-    input.placeholder = 'bedrock-agent-runtime retrieve --knowledge-base-id KB123456 …';
-    form.appendChild(prompt);
-    form.appendChild(input);
-    form.addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      this.runCli(input.value);
-    });
-    cli.appendChild(form);
+    if (this.runnable) {
+      // A runnable step: Run, Stop, the CLI, and the Pyodide runtime.
+      const runBtn = document.createElement('button');
+      runBtn.type = 'button';
+      runBtn.className = 'lab-run';
+      runBtn.textContent = 'Run';
+      runBtn.addEventListener('click', () => this.run());
+
+      const stopBtn = document.createElement('button');
+      stopBtn.type = 'button';
+      stopBtn.className = 'lab-stop';
+      stopBtn.textContent = 'Stop';
+      stopBtn.disabled = true;
+      stopBtn.addEventListener('click', () => this.stop());
+      this.stopBtn = stopBtn;
+
+      editor.appendChild(runBtn);
+      editor.appendChild(stopBtn);
+
+      this.output.textContent = 'Loading the runtime…';
+
+      // CLI: one line, mapped onto the same intercepted client.
+      cli.innerHTML = '';
+      const form = document.createElement('form');
+      form.className = 'lab-cli__form';
+      const prompt = document.createElement('span');
+      prompt.className = 'lab-cli__prompt';
+      prompt.textContent = 'aws';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'lab-cli__input';
+      input.setAttribute('aria-label', 'AWS CLI call');
+      input.placeholder = 'bedrock-agent-runtime retrieve --knowledge-base-id KB123456 …';
+      form.appendChild(prompt);
+      form.appendChild(input);
+      form.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        this.runCli(input.value);
+      });
+      cli.appendChild(form);
+    } else {
+      // A configuration step: Run checks the assembled artifact against the
+      // step's structural checks instead of executing it. No Pyodide, no CLI.
+      // This is the answer key — the visitor sees which required pieces are
+      // present and which forbidden ones leaked in.
+      const checkBtn = document.createElement('button');
+      checkBtn.type = 'button';
+      checkBtn.className = 'lab-run';
+      checkBtn.textContent = 'Check';
+      checkBtn.addEventListener('click', () => this.runChecks());
+      editor.appendChild(checkBtn);
+
+      this.output.textContent =
+        'Configuration step: assemble the artifact from the snippets, then ' +
+        'Check to verify it has what this decision requires.';
+    }
 
     this.files = new Map(this.data.files.map((f) => [f.path, f.body]));
     this.open(this.openPath);
-    this.boot();
+    if (this.runnable) this.boot();
   }
 
   open(path) {
@@ -509,6 +563,27 @@ class Workbench {
     this.output.textContent = 'Running…';
   }
 
+  /** Check a configuration step's assembled artifact against its structural
+   *  checks. No runtime: each check is a substring that must be present or
+   *  absent in what the visitor typed, with the decision it verifies. The
+   *  absence checks are the ones that catch a left-in mistake — a wildcard
+   *  IAM, a fine-tune job — that a 'does it contain' test alone would miss. */
+  runChecks() {
+    const text = this.textarea.value;
+    const lines = [];
+    let allPassed = true;
+    for (const check of this.checks) {
+      const found = text.includes(check.pattern);
+      const passed = check.present ? found : !found;
+      if (!passed) allPassed = false;
+      lines.push((passed ? '\u2713 ' : '\u2717 ') + check.message);
+    }
+    const header = allPassed
+      ? 'All checks passed. The artifact has what this decision requires.'
+      : 'Some checks did not pass. Read the \u2717 lines and adjust the artifact.';
+    this.output.textContent = header + '\n\n' + lines.join('\n');
+  }
+
   runCli(line) {
     if (!this.ready || !line.trim()) return;
     // The shim lives in Python so it shares the intercepted client. Translate
@@ -589,7 +664,12 @@ function mount() {
     return;
   }
   try {
-    new Workbench(root, data);
+    // Exposed so the nav script can re-sync the workbench to the new step
+    // after it swaps the lesson region. The workbench is deliberately kept
+    // mounted across a swap; without a handle to it, a Next between two call
+    // steps would leave its seed files and config-step checks pointing at the
+    // previous step.
+    window.__labWorkbench = new Workbench(root, data);
   } catch (err) {
     // A synchronous failure in render or boot must never leave a silent black
     // pane. Surface it where the visitor is looking, not only in the console.

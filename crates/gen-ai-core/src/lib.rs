@@ -18,7 +18,7 @@ pub use assets::Asset;
 pub use diagram::Layout;
 pub use render::{content_security_policy, landing, lesson, step_page};
 pub use scenario::{
-    Brief, CallStep, Cursor, Diagram, DiagramGroup, DiagramNode, SCHEMA_VERSION, Scenario,
+    Brief, CallStep, Check, Cursor, Diagram, DiagramGroup, DiagramNode, SCHEMA_VERSION, Scenario,
     ScenarioError, Snippet, Step,
 };
 
@@ -50,6 +50,21 @@ pub fn find<'a>(catalog: &'a [Scenario], id: &str) -> Option<&'a Scenario> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A botocore operation name (PascalCase) to its Python method
+    /// (snake_case): `StartIngestionJob` -> `start_ingestion_job`. An
+    /// underscore goes before each interior uppercase letter, then the whole
+    /// thing is lowercased.
+    fn pascal_to_snake(op: &str) -> String {
+        let mut out = String::new();
+        for (i, ch) in op.chars().enumerate() {
+            if i > 0 && ch.is_uppercase() {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        }
+        out
+    }
 
     #[test]
     fn every_embedded_scenario_parses() {
@@ -140,11 +155,16 @@ mod tests {
                     call.title,
                     bench.open
                 );
-                assert!(
-                    !bench.responses.is_empty(),
-                    "{} intercepts nothing, so nothing it runs can answer",
-                    call.title
-                );
+                // A runnable step must intercept something; a configuration
+                // step legitimately intercepts nothing, because its lesson is
+                // an artifact to read rather than a live call to run.
+                if call.is_runnable() {
+                    assert!(
+                        !bench.responses.is_empty(),
+                        "{} is runnable but intercepts nothing",
+                        call.title
+                    );
+                }
             }
         }
     }
@@ -161,10 +181,12 @@ mod tests {
                 // visitor assembles and runs, so every intercepted operation
                 // should appear in at least one snippet.
                 //
-                // botocore method names are the operation lowercased:
-                // Retrieve becomes retrieve, Converse becomes converse.
+                // botocore method names are the operation in snake_case:
+                // Retrieve -> retrieve, StartIngestionJob -> start_ingestion_job.
+                // A lowercase-only transform would miss the multi-word ones,
+                // so insert an underscore before each interior capital.
                 for response in &bench.responses {
-                    let method = response.operation.to_lowercase();
+                    let method = pascal_to_snake(&response.operation);
                     let taught = call
                         .snippets
                         .iter()
@@ -202,6 +224,123 @@ mod tests {
                         "{} has an unlabelled snippet, so the reader cannot tell what it is",
                         call.title
                     );
+                }
+            }
+        }
+    }
+
+    /// The python snippets of a runnable step, concatenated in authored order
+    /// the way a visitor assembles them into the open file. Non-python
+    /// snippets (a shell sidecar, a CDK/TypeScript trigger shown for context)
+    /// are not part of the runnable program and are excluded, the same way the
+    /// visitor would not paste them into a `.py` file.
+    #[cfg(test)]
+    fn assembled_python(call: &CallStep) -> String {
+        call.snippets
+            .iter()
+            .filter(|s| s.language == "python")
+            .map(|s| s.source.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    #[test]
+    fn a_runnable_steps_python_defines_before_it_uses() {
+        // The NameError class: a snippet calls `agent.retrieve(...)` but no
+        // snippet ever built `agent`. Individually every snippet is valid and
+        // reachable, so the structural checks pass; only assembling and
+        // reading them in order shows the client was never constructed. This
+        // is a cheap static stand-in for that — not a Python parser, just the
+        // one ordering fact that bit us: a client name is assigned before it
+        // is called. The execution oracle in smoke-test.mjs is the real proof;
+        // this fails fast, locally, without booting Pyodide.
+        for scenario in catalog().unwrap() {
+            for step in &scenario.steps {
+                let Some(call) = step.as_call() else { continue };
+                if !call.is_runnable() {
+                    continue;
+                }
+
+                let program = assembled_python(call);
+
+                // The client names this project uses. For each, if the program
+                // calls `name.` anywhere, an assignment `name =` or `name=`
+                // must appear at or before the first call site.
+                for client in ["agent", "runtime", "agent_build"] {
+                    let call_at = program.find(&format!("{client}."));
+                    let Some(call_pos) = call_at else { continue };
+
+                    let assign = program
+                        .find(&format!("{client} ="))
+                        .or_else(|| program.find(&format!("{client}=")));
+
+                    match assign {
+                        Some(assign_pos) => assert!(
+                            assign_pos < call_pos,
+                            "{}: '{}' is called before it is assigned in the assembled snippets",
+                            call.title,
+                            client
+                        ),
+                        None => panic!(
+                            "{}: assembled snippets call '{}.' but never assign '{}' \
+                             (the NameError this guard exists for)",
+                            call.title, client, client
+                        ),
+                    }
+                }
+
+                // boto3 has to be imported for any of those clients to exist.
+                if program.contains("boto3.client") {
+                    assert!(
+                        program.contains("import boto3"),
+                        "{}: assembled snippets use boto3 but never import it",
+                        call.title
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_runnable_steps_open_file_is_python_and_so_are_its_runnable_snippets() {
+        // The SyntaxError class: a CDK/TypeScript snippet tagged `python` gets
+        // pasted into a `.py` file and Run throws a Python SyntaxError. The
+        // open file of a runnable step is Python, so any snippet the visitor is
+        // meant to assemble *into* it must be Python too. A snippet in another
+        // language (a shell sidecar, a CDK trigger shown for context) is fine
+        // as long as it is tagged honestly, because then it reads as context
+        // rather than as something to paste and run.
+        for scenario in catalog().unwrap() {
+            for step in &scenario.steps {
+                let Some(call) = step.as_call() else { continue };
+                if !call.is_runnable() {
+                    continue;
+                }
+
+                assert!(
+                    call.workbench.open.ends_with(".py"),
+                    "{}: a runnable step should open a .py file, opens {}",
+                    call.title,
+                    call.workbench.open
+                );
+
+                // A TypeScript snippet mistagged as python is the exact trap:
+                // the `new` keyword and `const`/`=>` do not exist in Python, so
+                // a snippet claiming to be python must not contain them.
+                for snippet in &call.snippets {
+                    if snippet.language != "python" {
+                        continue;
+                    }
+                    for ts_only in ["new ", "const ", "=> {", ");\n};"] {
+                        assert!(
+                            !snippet.source.contains(ts_only),
+                            "{}: a snippet tagged python contains TypeScript ('{}') — \
+                             it will SyntaxError when assembled into {}",
+                            call.title,
+                            ts_only.trim(),
+                            call.workbench.open
+                        );
+                    }
                 }
             }
         }
@@ -262,6 +401,54 @@ mod tests {
                         "{} adds nothing beyond the exception name",
                         reason.on_exception
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_config_check_can_be_satisfied_by_assembling_the_snippets() {
+        // The answer-key integrity test, and the guard for the step-20 bug: a
+        // check pattern is matched as a case-sensitive substring of the open
+        // file, and the visitor fills that file by assembling the snippets. So
+        // a `present: true` pattern that appears in no snippet can never pass
+        // no matter how correctly the step is done — the check said "token
+        // quota" lowercase while the snippet wrote "Tokens" capitalized, so
+        // Check reported a failure on a correctly assembled artifact. And a
+        // `present: false` pattern that IS in a snippet the step tells the
+        // visitor to assemble fails the moment they follow the instructions.
+        //
+        // Only the snippet sources count: runChecks() reads the editor
+        // textarea, not NOTES or labels, so a forbidden string living in the
+        // prose (every absence lesson names the thing it forbids) is fine.
+        for scenario in catalog().unwrap() {
+            for step in &scenario.steps {
+                let Some(call) = step.as_call() else { continue };
+
+                let assembled = call
+                    .snippets
+                    .iter()
+                    .map(|s| s.source.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                for check in &call.workbench.checks {
+                    let found = assembled.contains(&check.pattern);
+                    if check.present {
+                        assert!(
+                            found,
+                            "{}: required check pattern {:?} is in no snippet, so \
+                             Check can never pass on a correctly assembled artifact",
+                            call.title, check.pattern
+                        );
+                    } else {
+                        assert!(
+                            !found,
+                            "{}: forbidden check pattern {:?} is in a snippet the step \
+                             tells the visitor to assemble, so Check fails when they do",
+                            call.title, check.pattern
+                        );
+                    }
                 }
             }
         }

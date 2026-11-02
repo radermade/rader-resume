@@ -16,10 +16,18 @@ This file is the plan. Phase folders with `requirements.md`, `design.md`, and
 | Phase | Name | Status |
 | --- | --- | --- |
 | 0 | Decisions | This file |
-| 1 | Skeleton on `/gen-ai` | Built locally, not deployed |
-| 2 | The workbench is real | Not started |
-| 3 | One scenario, start to finish | Not started |
+| 1 | Skeleton on `/gen-ai` | Done, deployed |
+| 2 | The workbench is real | Done, deployed |
+| 3 | One scenario, start to finish | Specced |
 | 4 | The catalog | Not started |
+
+Phase 2 shipped beyond its original plan: jedi typeahead, the
+snippet-assembly model (a pivot from seed-the-answer), self-hosted Pyodide on
+S3 behind CloudFront, and a committed Pyodide smoke test. It also proved that
+authored exception claims must be verified against real botocore — two
+break-it exercises were wrong as written — which is the central discipline
+phase 3 inherits. See `phase2/self-hosting.md` for the runtime-integration
+findings and `phase3/` for the authoring plan.
 
 ## What a session is
 

@@ -242,13 +242,14 @@ export class SiteStack extends Stack {
     // it does not belong in the function. The bucket keeps the whole payload
     // on this origin, so the workbench policy stays `'self'` with no CDN.
     //
-    // `originPath` strips the `/gen-ai/assets/pyodide` request prefix so the
-    // S3 key is just `pyodide/...`, matching the BucketDeployment prefix. OAC
-    // and the read grant are created by this origin helper; the bucket itself
-    // stays private with public access blocked.
-    const labRuntimeOrigin = S3BucketOrigin.withOriginAccessControl(lab.assetBucket, {
-      originPath: '/gen-ai/assets',
-    });
+    // No originPath: CloudFront *prepends* originPath to the forwarded request
+    // path, it does not strip it, so an originPath here would double the
+    // prefix and 404. Instead the S3 keys mirror the full request path
+    // (`gen-ai/assets/pyodide/...`, set by the BucketDeployment prefix), so a
+    // request for `/gen-ai/assets/pyodide/pyodide.js` maps straight to that
+    // key. OAC and the read grant are created by this origin helper; the
+    // bucket stays private with public access blocked.
+    const labRuntimeOrigin = S3BucketOrigin.withOriginAccessControl(lab.assetBucket);
 
     const labRuntime = {
       origin: labRuntimeOrigin,

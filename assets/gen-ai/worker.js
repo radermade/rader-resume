@@ -66,15 +66,68 @@ class _RawBody:
 def _service_from_request(request):
     # The service is the first host label, e.g.
     # bedrock-agent-runtime.eu-central-1.amazonaws.com. The transport-layer
-    # context carries no service_id/operation_name for rest-json services and
-    # there is no X-Amz-Target header, so the URL is the reliable source.
+    # context carries no service_id, so the URL is the reliable source for it.
     host = urlparse(request.url).hostname or ""
     return host.split(".")[0]
 
 
+# Capture the operation name botocore itself resolved, threaded to the send
+# seam through the request context.
+#
+# The URL cannot name the operation on its own. Most rest-json operations put
+# their verb in the trailing path segment (Retrieve is
+# POST /knowledgebases/{id}/retrieve), but REST collection operations do not:
+# StartIngestionJob is PUT /knowledgebases/{kb}/datasources/{ds}/ingestionjobs/,
+# whose trailing segment is the collection ingestionjobs, not the operation.
+# Guessing from (method, path) means a lookup table that grows with every
+# operation of an unusual shape and is wrong by default.
+#
+# botocore already knows the operation. The before-call event fires with the
+# resolved operation model, and the context dict it receives is the same one
+# the request carries at send time. Registering the hook on every created
+# client and stashing the operation name there lets the send seam match on the
+# name botocore chose -- correct for every service, no per-operation table.
+def _lab_before_call(params, **kwargs):
+    model = kwargs.get("model")
+    ctx = params.get("context")
+    if ctx is not None and model is not None:
+        ctx["lab_operation"] = getattr(model, "name", None)
+
+
+import botocore.client
+
+# Guard against double-wrapping. The intercept source is re-run on every step
+# mount (each step installs its own responses), and wrapping create_client a
+# second time would capture the already-wrapped function as the original and
+# recurse forever. Stash the genuine original on the class the first time and
+# reuse it on every subsequent install.
+if not hasattr(botocore.client.ClientCreator, "_lab_orig_create_client"):
+    botocore.client.ClientCreator._lab_orig_create_client = (
+        botocore.client.ClientCreator.create_client
+    )
+
+_lab_orig_create_client = botocore.client.ClientCreator._lab_orig_create_client
+
+
+def _lab_create_client(self, *args, **kwargs):
+    # Register on every client the visitor builds, from any session, so the
+    # operation name is present no matter how the client was constructed.
+    client = _lab_orig_create_client(self, *args, **kwargs)
+    client.meta.events.register("before-call", _lab_before_call)
+    return client
+
+
+botocore.client.ClientCreator.create_client = _lab_create_client
+
+
 def _operation_from_request(request):
-    # rest-json operations are the trailing path segment: Retrieve is
-    # POST /knowledgebases/{id}/retrieve, Converse is POST /model/{id}/converse.
+    # The operation name botocore resolved, stashed by _lab_before_call. The
+    # trailing-path-segment fallback covers the (unexpected) case of the hook
+    # not having run, so a verb-in-path operation still matches.
+    ctx = request.context or {}
+    op = ctx.get("lab_operation")
+    if op:
+        return op
     path = urlparse(request.url).path or ""
     segments = [s for s in path.split("/") if s]
     return segments[-1] if segments else ""
@@ -188,9 +241,16 @@ async function boot(base, files, responsesJson, packages, wheels) {
   // outer wraps it in quotes. A single stringify yields `[{...}]`, which
   // Python reads as a list and json.loads rejects with "must be str, not
   // list". The smoke test double-encodes the same way.
+  // A configuration step has no responses, and the Rust side omits an empty
+  // array entirely (skip_serializing_if), so responsesJson arrives undefined.
+  // Default it to [] — JSON.stringify(undefined) is the string "undefined",
+  // which would substitute a bare `undefined` token into the Python and raise
+  // NameError. An empty list is the correct intercept for a config step:
+  // nothing to answer, any call fails as a real EndpointConnectionError.
+  const responses = responsesJson ?? [];
   const intercept = INTERCEPT.replace(
     '__RESPONSES_JSON__',
-    JSON.stringify(JSON.stringify(responsesJson)),
+    JSON.stringify(JSON.stringify(responses)),
   );
   await pyodide.runPythonAsync(intercept);
   await pyodide.runPythonAsync(COMPLETION_SETUP);

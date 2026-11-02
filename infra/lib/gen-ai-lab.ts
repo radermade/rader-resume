@@ -10,6 +10,7 @@ import {
 } from 'aws-cdk-lib/aws-s3';
 import { BucketDeployment, CacheControl, Source } from 'aws-cdk-lib/aws-s3-deployment';
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { RustFunction } from 'cargo-lambda-cdk';
 import { Construct } from 'constructs';
 
@@ -111,15 +112,19 @@ export class GenAiLab extends Construct {
     // must not require them to exist: an empty or absent directory means the
     // bucket deploys empty and the workbench hangs honestly until the runtime
     // is present, rather than failing the whole stack.
-    const vendoredRuntime = '../assets/gen-ai/pyodide';
+    // Anchored to this file, not the cwd: cdk may run from infra/ or deploy a
+    // prebuilt cdk.out, and a cwd-relative path resolves differently in each.
+    // __dirname is infra/lib, so the repo's assets dir is two levels up.
+    const vendoredRuntime = join(__dirname, '../../assets/gen-ai/pyodide');
     if (existsSync(vendoredRuntime)) {
       new BucketDeployment(this, 'RuntimeDeployment', {
         sources: [Source.asset(vendoredRuntime)],
         destinationBucket: this.assetBucket,
-        // Served under `/gen-ai/assets/pyodide/`; CloudFront strips the
-        // `/gen-ai/assets/pyodide` prefix via the behavior's origin path, so
-        // the key prefix here is just `pyodide/`.
-        destinationKeyPrefix: 'pyodide',
+        // Keys mirror the full request path. CloudFront forwards
+        // `/gen-ai/assets/pyodide/<file>` to the origin unchanged (no
+        // originPath), so the S3 key must be exactly that. The source dir is
+        // the pyodide/ contents, so the prefix supplies the leading segments.
+        destinationKeyPrefix: 'gen-ai/assets/pyodide',
         // Immutable, content-addressed: the long TTL is set on the behavior,
         // and this header makes a direct-origin fetch honest too.
         cacheControl: [

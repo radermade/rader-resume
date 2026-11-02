@@ -17,7 +17,7 @@
 // Exits non-zero on any failure so CI fails loudly.
 
 import { loadPyodide } from './pyodide/pyodide.mjs';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,32 +60,46 @@ const COMPLETION_SETUP = extractTemplate(workerSrc, 'COMPLETION_SETUP');
 const RUN_HARNESS = extractTemplate(workerSrc, 'RUN_HARNESS');
 const WHEELS = extractWheels(workbenchSrc);
 
-// The authored scenario's assembled call and responses, mirroring
-// content/gen-ai/policy-assistant.json. If the scenario changes materially,
-// this harness is updated with it — it is a smoke test of the mechanism, not
-// a content test.
-const RESPONSES = [
-  { service: 'bedrock-agent-runtime', operation: 'Retrieve', body: { retrievalResults: [{ content: { text: 'Parental leave in Germany: up to 156 weeks.' }, location: { type: 'S3', s3Location: { uri: 's3://policy-corpus-eu/hr/parental-leave-de-v7.pdf' } }, score: 0.82 }] } },
-  { service: 'bedrock-runtime', operation: 'Converse', body: { output: { message: { role: 'assistant', content: [{ text: 'Up to 156 weeks. Source: hr/parental-leave-de-v7.pdf.' }] } }, stopReason: 'end_turn', usage: { inputTokens: 412, outputTokens: 58, totalTokens: 470 } } },
-];
+// Every authored scenario, read from content/ rather than copied here. This
+// is the change that makes the harness scale: it runs each runnable step's
+// own assembled snippets against that step's own intercepted responses, so a
+// new scenario file is covered the moment it lands, with no edit here. The
+// bugs this caught by hand (a client never built, a CDK snippet pasted as
+// Python) become CI failures instead.
+const contentDir = join(here, '..', '..', 'content', 'gen-ai');
+const scenarioFiles = (await readdir(contentDir)).filter((f) => f.endsWith('.json'));
+if (scenarioFiles.length === 0) fail('no scenarios found in content/gen-ai');
 
-const SCENARIO = `
-import boto3
-agent = boto3.client("bedrock-agent-runtime", region_name="eu-central-1")
-runtime = boto3.client("bedrock-runtime", region_name="eu-central-1")
-QUESTION = "How many weeks of parental leave apply in Germany?"
-found = agent.retrieve(knowledgeBaseId="KB1234567890", retrievalQuery={"text": QUESTION})
-for chunk in found["retrievalResults"]:
-    print(chunk["location"]["s3Location"]["uri"])
-context = "\\n\\n".join(c["content"]["text"] for c in found["retrievalResults"])
-reply = runtime.converse(
-    modelId="eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    messages=[{"role": "user", "content": [{"text": context}]}],
-    inferenceConfig={"maxTokens": 512},
-)
-print(reply["stopReason"])
-print(reply["output"]["message"]["content"][0]["text"])
-`;
+/** The python snippets of a step, concatenated in authored order the way a
+ *  visitor assembles them into the open file. A non-python snippet (a shell
+ *  sidecar, a CDK trigger shown for context) is not part of the runnable
+ *  program, exactly as the visitor would not paste it into a .py file. */
+function assemblePython(step) {
+  return step.snippets
+    .filter((s) => s.language === 'python')
+    .map((s) => s.source)
+    .join('\n\n');
+}
+
+/** Every runnable step across every scenario: { scenario, title, code,
+ *  responses }. A runnable step is one with intercepted responses; a config
+ *  step has none and is verified by its structural checks, not by running. */
+const runnableSteps = [];
+for (const file of scenarioFiles) {
+  const doc = JSON.parse(await readFile(join(contentDir, file), 'utf8'));
+  for (const step of doc.steps) {
+    if (step.kind !== 'call') continue;
+    const responses = step.workbench.responses || [];
+    if (responses.length === 0) continue; // config step
+    runnableSteps.push({
+      scenario: doc.id,
+      title: step.title,
+      code: assemblePython(step),
+      responses,
+    });
+  }
+}
+if (runnableSteps.length === 0) fail('no runnable steps found to verify');
 
 console.log('Booting Pyodide from vendored runtime…');
 const py = await loadPyodide({ indexURL: pyodideDir + '/' });
@@ -94,18 +108,19 @@ console.log('Loading ssl + ' + WHEELS.length + ' wheels…');
 await py.loadPackage('ssl');
 await py.loadPackage(WHEELS.map((w) => join(wheelDir, w)));
 
-console.log('Installing intercept and completion setup (from worker.js)…');
-// This must mirror boot() in worker.js exactly — same double-encoding. The
-// intercept does json.loads(__RESPONSES_JSON__), so the marker is replaced
-// with a string literal containing JSON (double stringify), not a bare array
-// (single stringify), which Python reads as a list and rejects. Keeping this
-// identical to boot() is the whole point: a mismatch here is the bug the
-// smoke test exists to catch.
-const interceptForSmoke = INTERCEPT.replace(
-  '__RESPONSES_JSON__',
-  JSON.stringify(JSON.stringify(RESPONSES)),
-);
-await py.runPythonAsync(interceptForSmoke);
+// Build the intercept exactly as boot() in worker.js does, so the smoke test
+// exercises the real substitution rather than a copy that can drift. boot()
+// defaults a missing responses array to [] (a config step omits it) and
+// double-encodes, so the marker becomes a string literal of JSON. A single
+// stringify yields a bare array Python reads as a list; an undefined without
+// the ?? [] yields the literal token `undefined` and a NameError. Both were
+// real bugs this mirrors.
+function buildIntercept(responsesJson) {
+  const responses = responsesJson ?? [];
+  return INTERCEPT.replace('__RESPONSES_JSON__', JSON.stringify(JSON.stringify(responses)));
+}
+
+console.log('Installing completion setup (from worker.js)…');
 await py.runPythonAsync(COMPLETION_SETUP);
 
 // 1. Completion: typing boto3. resolves against the live library.
@@ -118,19 +133,62 @@ if (!names.includes('client')) {
 }
 console.log('  completion OK (boto3. -> ' + names.slice(0, 5).join(', ') + '…)');
 
-// 2. The authored call runs end to end through the intercept.
-py.FS.writeFile('__run_target__', SCENARIO);
-const result = JSON.parse(await py.runPythonAsync(RUN_HARNESS));
-if (result.traceback) {
-  fail('scenario raised:\n' + result.traceback);
-}
-const out = result.stdout;
-for (const expected of ['parental-leave-de-v7.pdf', 'end_turn', '156 weeks']) {
-  if (!out.includes(expected)) {
-    fail('scenario output missing "' + expected + '". Got:\n' + out);
+// Every string leaf in a response body, so the "intercepted response
+// surfaced" assertion can check whether any of them appears in what the step
+// printed — the chunk text, the answer, a job status, a cited URI — without
+// this harness knowing which field a given step chose to print. Uses the
+// step's own content, not a value hardcoded here, so it scales to any
+// scenario.
+function stringLeaves(value, out = []) {
+  if (typeof value === 'string') {
+    if (value.trim()) out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) stringLeaves(v, out);
+  } else if (value && typeof value === 'object') {
+    for (const v of Object.values(value)) stringLeaves(v, out);
   }
+  return out;
 }
-console.log('  scenario OK (intercepted response parsed and printed)');
+
+// 2. Every runnable step, across every scenario, assembled and run through the
+// intercept seeded with that step's own responses. This is the oracle: a step
+// whose snippets do not assemble into a running program (a client never built,
+// a non-python snippet pasted in) fails here, in CI, instead of in a browser.
+console.log('Running ' + runnableSteps.length + ' runnable step(s) across ' + scenarioFiles.length + ' scenario(s)…');
+for (const step of runnableSteps) {
+  const label = step.scenario + ' / ' + step.title;
+
+  if (!step.code.trim()) {
+    fail(label + ': runnable step assembled no python to run');
+  }
+
+  // Seed the intercept with this step's own responses, exactly as boot() does.
+  await py.runPythonAsync(buildIntercept(step.responses));
+
+  py.FS.writeFile('__run_target__', step.code);
+  const result = JSON.parse(await py.runPythonAsync(RUN_HARNESS));
+  if (result.traceback) {
+    fail(label + ' raised when assembled and run:\n' + result.traceback);
+  }
+
+  // The intercept must actually reach the output: at least one string from
+  // the step's own responses appears in what it printed. This proves the
+  // substitution wired through end to end without demanding the step print
+  // every field (a step prints the answer, not the token counts). A step that
+  // runs but surfaces nothing from its response — the step-8 "prints only the
+  // filename" smell — fails here.
+  const leaves = step.responses.flatMap((r) => stringLeaves(r.body));
+  if (leaves.length > 0) {
+    const surfaced = leaves.some((leaf) => result.stdout.includes(leaf));
+    if (!surfaced) {
+      fail(
+        label + ': ran, but no part of the intercepted response surfaced in the output.\n' +
+          'Expected one of: ' + leaves.slice(0, 8).join(' | ') + '\nGot:\n' + result.stdout
+      );
+    }
+  }
+  console.log('  OK  ' + label);
+}
 
 // 3. A wrong-plane call fails as the real exception, not a wrapper.
 py.FS.writeFile('__run_target__', 'import boto3\nboto3.client("bedrock-agent-runtime", region_name="eu-central-1").converse(modelId="x", messages=[], inferenceConfig={"maxTokens": 1})\n');
@@ -139,5 +197,21 @@ if (!wrong.traceback) {
   fail('converse on the agent client should have raised, but did not');
 }
 console.log('  wrong-plane call raises a real exception OK');
+
+// 4. A configuration step has no responses. The Rust side omits the empty
+// array, so boot() receives undefined and must default it. Installing the
+// intercept with undefined must not raise (the `undefined`-token NameError
+// bug), and a call then fails honestly as EndpointConnectionError rather than
+// returning a mocked body.
+await py.runPythonAsync(buildIntercept(undefined));
+py.FS.writeFile('__run_target__', 'import boto3\ntry:\n    boto3.client("bedrock-runtime", region_name="eu-central-1").converse(modelId="x", messages=[{"role":"user","content":[{"text":"hi"}]}], inferenceConfig={"maxTokens":1})\n    print("NO_ERROR")\nexcept Exception as e:\n    print(type(e).__name__)\n');
+const config = JSON.parse(await py.runPythonAsync(RUN_HARNESS));
+if (config.traceback) {
+  fail('config-step intercept install raised:\n' + config.traceback);
+}
+if (!config.stdout.includes('EndpointConnectionError')) {
+  fail('a config-step call should fail as EndpointConnectionError; got: ' + config.stdout);
+}
+console.log('  config step (no responses) installs and fails calls honestly OK');
 
 console.log('\nSMOKE TEST PASSED');

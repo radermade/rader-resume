@@ -108,10 +108,10 @@ async fn asset(uri: axum::http::Uri) -> Response {
     // no CloudFront, so the handler must serve the vendored files off disk or
     // the workbench cannot load its runtime. Guarded to the Lambda-absent case
     // so the deployed function never reads from a filesystem it does not have.
-    if std::env::var_os("AWS_LAMBDA_RUNTIME_API").is_none() {
-        if let Some(response) = serve_vendored_runtime(uri.path()).await {
-            return response;
-        }
+    if std::env::var_os("AWS_LAMBDA_RUNTIME_API").is_none()
+        && let Some(response) = serve_vendored_runtime(uri.path()).await
+    {
+        return response;
     }
 
     StatusCode::NOT_FOUND.into_response()

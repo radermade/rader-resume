@@ -53,6 +53,15 @@ fn workbench_json(call: &CallStep) -> String {
     let payload = serde_json::json!({
         "workbench": &call.workbench,
         "workerUrl": WORKER.url(),
+        // Whether this step runs a live call. A configuration step seeds a
+        // CDK/config artifact (TypeScript, YAML) to read and assemble, not
+        // Python to execute. It does not run against the intercept; instead
+        // its Run checks the assembled artifact against the structural checks
+        // below. The JS branches on this.
+        "runnable": call.is_runnable(),
+        // The config step's answer key: checks run in the browser when Run is
+        // pressed on a step with no live call. A runnable step has none.
+        "checks": &call.workbench.checks,
     });
     let json = serde_json::to_string(&payload).expect("workbench serializes");
     json.replace("</", "<\\/")
@@ -103,6 +112,15 @@ fn policy(layout: Option<&Layout<'_>>, powers: PagePowers) -> String {
         "form-action 'self'".to_owned(),
         format!("style-src {}", csp_hash(&stylesheet(layout))),
     ];
+
+    // The architecture diagram draws product icons as `<img>` from this
+    // origin, and only a page with a layout draws the diagram (the overview).
+    // So `img-src 'self'` is added exactly where an icon can appear and
+    // nowhere else, rather than as a blanket directive. Same-origin only; no
+    // third party.
+    if layout.is_some() {
+        directives.push("img-src 'self'".to_owned());
+    }
 
     if powers == PagePowers::Workbench {
         // Everything the workbench needs is on this origin, so the whole
@@ -273,6 +291,18 @@ pub fn lesson(cursor: &Cursor<'_>, layout: Option<&Layout<'_>>) -> Markup {
                     }
                 }
                 Step::Call(call) => {
+                    // The step's workbench payload, carried inside the
+                    // swappable region so a fragment swap can re-sync the
+                    // persistent workbench to the new step. On a full load the
+                    // canonical block in `workbench()` is what the asset reads;
+                    // this carrier exists for the nav script, under a distinct
+                    // id so the two never collide. Without it, Next swaps the
+                    // lesson but leaves the workbench — its seed files, its
+                    // config-step checks, its runnable flag — showing the
+                    // previous step.
+                    script type="application/json" id="lab-step-data" {
+                        (maud::PreEscaped(workbench_json(call)))
+                    }
                     section class="lab-pane" {
                         h2 { "The decision" }
                         p { (call.decision) }
@@ -290,8 +320,28 @@ pub fn lesson(cursor: &Cursor<'_>, layout: Option<&Layout<'_>>) -> Markup {
                             "Assemble these in the editor on the right, then Run."
                         }
                         @for snippet in &call.snippets {
-                            div class="lab-snippet" {
-                                p class="lab-snippet__label" { (snippet.label) }
+                            // A snippet in a runnable step that is not the open
+                            // file's language is reference, not something to
+                            // paste into the editor: the shell sidecar beside a
+                            // PDF, a CDK trigger shown for context. Marking it
+                            // keeps a visitor from assembling it into a .py file
+                            // and hitting a syntax error on Run — the failure
+                            // that reached step 9's editor.
+                            @let is_reference = call.is_runnable()
+                                && snippet.language != "python";
+                            div class={
+                                @if is_reference { "lab-snippet lab-snippet--reference" }
+                                @else { "lab-snippet" }
+                            } {
+                                p class="lab-snippet__label" {
+                                    span class="lab-snippet__lang" { (snippet.language) }
+                                    (snippet.label)
+                                    @if is_reference {
+                                        span class="lab-snippet__ref" {
+                                            " — reference, not for the editor"
+                                        }
+                                    }
+                                }
                                 pre class="lab-code" {
                                     code { (snippet.source) }
                                 }
@@ -365,6 +415,13 @@ fn architecture(layout: &Layout<'_>) -> Markup {
 
                 @for placed in &layout.nodes {
                     div class="lab-node" id=(format!("lab-node-{}", placed.node.id)) {
+                        // The product icon, when the node names one the lab
+                        // has. aria-hidden: the caption below is the label, so
+                        // the diagram reads identically with or without it,
+                        // and an unknown key simply renders no image.
+                        @if let Some(url) = placed.node.icon.as_deref().and_then(crate::assets::icon_url) {
+                            img class="lab-node__icon" src=(url) alt="" aria-hidden="true";
+                        }
                         span class="lab-node__caption" { (placed.node.label) }
                     }
                 }
@@ -490,6 +547,18 @@ mod tests {
         crate::catalog().unwrap()
     }
 
+    /// The index of the first runnable call step in a scenario — one that
+    /// intercepts a response and so exercises boto3. Tests that assert on a
+    /// live call find it this way rather than hardcoding an index, so
+    /// inserting configuration steps ahead of it does not break them.
+    fn first_runnable(scenario: &Scenario) -> usize {
+        scenario
+            .steps
+            .iter()
+            .position(|s| s.as_call().is_some_and(|c| c.is_runnable()))
+            .expect("a scenario has at least one runnable call step")
+    }
+
     #[test]
     fn landing_lists_every_project_as_a_link() {
         let catalog = catalog();
@@ -579,6 +648,64 @@ mod tests {
     }
 
     #[test]
+    fn the_lesson_fragment_carries_the_steps_own_workbench_payload() {
+        // The swap replaces only the lesson, leaving the workbench mounted. So
+        // the fragment must carry its step's workbench payload for the nav
+        // script to re-sync, or a config step grades against the previous
+        // step's checks. Find two adjacent config steps and show each
+        // fragment carries its own checks, not its neighbour's.
+        let catalog = catalog();
+        let scenario = &catalog[0];
+
+        let config_indices: Vec<usize> = scenario
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.as_call().is_some_and(|c| !c.is_runnable()))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            config_indices.len() >= 2,
+            "need two config steps to prove the fragment is step-specific"
+        );
+
+        let a = Cursor::at(scenario, config_indices[0]);
+        let b = Cursor::at(scenario, config_indices[1]);
+        let a_call = a.step().as_call().unwrap();
+        let b_call = b.step().as_call().unwrap();
+
+        let frag_a = lesson(&a, None).into_string();
+        let frag_b = lesson(&b, None).into_string();
+
+        let _ = a_call; // kept for symmetry; the assertion is on the fragments.
+
+        assert!(
+            frag_a.contains(r#"id="lab-step-data""#),
+            "the fragment must carry the step's workbench payload for re-sync"
+        );
+
+        // Pick a check message unique to step B, not present anywhere in A's
+        // fragment (snippets and infrastructure included). A swap that failed
+        // to re-sync would be the only way B's answer key could surface on A.
+        let b_only = b_call
+            .workbench
+            .checks
+            .iter()
+            .map(|c| c.message.as_str())
+            .find(|m| !frag_a.contains(*m))
+            .expect("two different config steps should differ in at least one check message");
+
+        assert!(
+            frag_b.contains(b_only),
+            "step B's fragment must carry step B's own checks"
+        );
+        assert!(
+            !frag_a.contains(b_only),
+            "step A's fragment must not carry step B's checks"
+        );
+    }
+
+    #[test]
     fn the_overview_fragment_declares_no_workbench() {
         let catalog = catalog();
         let cursor = Cursor::at(&catalog[0], 0);
@@ -616,24 +743,46 @@ mod tests {
         // block is parsed.
         assert!(call.contains(&format!(r#"<script src="{}" defer>"#, WORKBENCH.url())));
 
-        // A reader on the overview never fetches the runtime entry.
-        assert!(!overview.contains("workbench."));
-        assert!(!overview.contains("/gen-ai/assets/"));
+        // A reader on the overview never fetches the runtime scripts. It does
+        // fetch diagram icons from `/gen-ai/assets/`, so the check is on the
+        // scripts specifically, not any asset: no workbench, worker, or nav
+        // script, and no `<script src>` at all on a style-only page.
+        assert!(!overview.contains(&WORKBENCH.url()));
+        assert!(!overview.contains(&WORKER.url()));
+        assert!(!overview.contains(&NAV.url()));
+        assert!(!overview.contains("<script src"));
+    }
+
+    #[test]
+    fn the_overview_draws_product_icons_from_this_origin() {
+        let catalog = catalog();
+        let overview = step_page(&Cursor::at(&catalog[0], 0)).into_string();
+
+        // The diagram nodes that name an icon render it as an aria-hidden img
+        // from a content-hashed same-origin URL, so the caption stays the
+        // label and `img-src 'self'` covers the fetch.
+        let lambda = crate::assets::icon_url("lambda").unwrap();
+        assert!(overview.contains(&format!(r#"<img class="lab-node__icon" src="{lambda}""#)));
+        assert!(overview.contains(r#"alt="" aria-hidden="true""#));
+        // The page declares img-src so the icon is allowed.
+        assert!(overview.contains("img-src 'self'"));
     }
 
     #[test]
     fn the_workbench_data_is_inert_and_escaped() {
         let catalog = catalog();
-        let cursor = Cursor::at(&catalog[0], 1);
+        let cursor = Cursor::at(&catalog[0], first_runnable(&catalog[0]));
         let html = step_page(&cursor).into_string();
 
         // A JSON data block, not executable script, so no inline code needs a
         // hash and the policy can keep script-src to the asset alone.
         assert!(html.contains(r#"<script type="application/json" id="lab-workbench-data">"#));
 
-        // The seed file's content is present, so the asset has something to
-        // mount. `boto3` appears because the seeded call imports it.
-        assert!(html.contains("boto3"));
+        // The seed content is present, so the asset has something to mount.
+        // Assert on the open file's path, which every step's data block
+        // carries, rather than a token that happens to be in one step's seed.
+        let call = cursor.step().as_call().unwrap();
+        assert!(html.contains(&call.workbench.open));
 
         // No raw `</script>` from authored content can close the block early.
         // The serializer neutralizes `</`, so the only `</script>` in the
@@ -647,7 +796,7 @@ mod tests {
 
     #[test]
     fn the_serializer_neutralizes_a_closing_script_tag() {
-        use crate::scenario::{CallStep, Intercepted, Reason, SeedFile, Snippet, Workbench};
+        use crate::scenario::{Check, Intercepted, Reason, SeedFile, Snippet, Workbench};
 
         // A hostile seed file that contains the one sequence that would break
         // out of a JSON script block. Authored content is trusted, but a
@@ -674,6 +823,7 @@ mod tests {
                     body: serde_json::json!({}),
                 }],
                 reasons: Vec::<Reason>::new(),
+                checks: Vec::<Check>::new(),
             },
         };
 
@@ -695,7 +845,7 @@ mod tests {
     #[test]
     fn a_call_step_still_teaches_without_script() {
         let catalog = catalog();
-        let cursor = Cursor::at(&catalog[0], 1);
+        let cursor = Cursor::at(&catalog[0], first_runnable(&catalog[0]));
         let html = step_page(&cursor).into_string();
         let call = cursor.step().as_call().unwrap();
 
@@ -774,15 +924,23 @@ mod tests {
             Step::Call(_) => unreachable!("step 1 is the overview"),
         };
 
-        let policy = policy(Some(&layout), PagePowers::Static);
-        assert!(policy.contains(&csp_hash(&stylesheet(Some(&layout)))));
-        assert!(policy.starts_with("default-src 'none'"));
+        let overview_policy = policy(Some(&layout), PagePowers::Static);
+        assert!(overview_policy.contains(&csp_hash(&stylesheet(Some(&layout)))));
+        assert!(overview_policy.starts_with("default-src 'none'"));
         // A reader who never runs code is under no script or eval power at all.
-        assert!(!policy.contains("script-src"));
-        assert!(!policy.contains("unsafe-inline"));
-        assert!(!policy.contains("unsafe-eval"));
-        assert!(!policy.contains("unsafe-hashes"));
-        assert!(!policy.contains('*'));
+        assert!(!overview_policy.contains("script-src"));
+        assert!(!overview_policy.contains("unsafe-inline"));
+        assert!(!overview_policy.contains("unsafe-eval"));
+        assert!(!overview_policy.contains("unsafe-hashes"));
+        assert!(!overview_policy.contains('*'));
+        // The one widening the overview takes over the landing is `img-src
+        // 'self'`, for the diagram icons — same origin, no script power.
+        assert!(overview_policy.contains("img-src 'self'"));
+
+        // And the landing, which draws no diagram, does not even take that:
+        // no layout means no img-src.
+        let landing_policy = policy(None, PagePowers::Static);
+        assert!(!landing_policy.contains("img-src"));
     }
 
     #[test]
