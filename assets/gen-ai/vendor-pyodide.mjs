@@ -213,7 +213,13 @@ async function resolveWheels() {
 }
 
 async function main() {
-  if (!existsSync(outDir) || process.argv.includes('--core')) {
+  // Fetch the core when it is actually missing, not merely when the directory
+  // is absent. `pyodide-lock.json` is the one committed file in this dir, so a
+  // fresh CI checkout has the directory but none of the runtime — guarding on
+  // the directory would skip the fetch and leave the smoke test importing a
+  // `pyodide.mjs` that was never downloaded. Guard on a core file instead.
+  const corePresent = existsSync(join(outDir, 'pyodide.mjs'));
+  if (!corePresent || process.argv.includes('--core')) {
     await fetchCore();
   }
   // ssl + openssl, so urllib3's import of the ssl module resolves under
