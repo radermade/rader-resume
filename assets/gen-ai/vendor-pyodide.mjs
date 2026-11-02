@@ -118,90 +118,94 @@ async function fetchDistributionPackages() {
 async function resolveWheels() {
   await mkdir(wheelDir, { recursive: true });
 
-  // Boot the just-downloaded Pyodide under Node. loadPyodide loads the runtime
-  // from the local core files we just fetched; micropip resolves the tree.
-  const { loadPyodide } = await import(join(outDir, 'pyodide.mjs'));
-  const pyodide = await loadPyodide({ indexURL: outDir + '/' });
-  await pyodide.loadPackage('micropip');
-  const micropip = pyodide.pyimport('micropip');
-
-  console.log(`Resolving ${PACKAGES.join(', ')} with micropip`);
-  await micropip.install(PACKAGES);
-
-  // micropip.list() is the installed set — exactly our packages and their
-  // transitive deps, not the whole catalog. Each entry records where its wheel
-  // came from: a full https URL for a PyPI package, or a bare distribution
-  // filename for one that came from Pyodide's own repo. The two need different
-  // base URLs, which is the thing the first attempt got wrong.
-  const listProxy = micropip.list();
-  const installed = listProxy.toJs
-    ? listProxy.toJs({ dict_converter: Object.fromEntries })
-    : JSON.parse(micropip.freeze()).packages;
-
-  // The Pyodide lockfile maps a distribution package to its wheel filename,
-  // served from the same CDN the core came from. We already downloaded it.
+  // Resolve deterministically from two authoritative sources, no micropip:
+  //   - packages in the Pyodide lockfile (jedi, parso, urllib3, six,
+  //     python-dateutil) come from the CDN by their lockfile file_name;
+  //   - the rest (boto3, botocore, jmespath, s3transfer) are PyPI-only pure
+  //     wheels, fetched by querying the PyPI JSON API for the py3-none-any
+  //     wheel.
+  // Observing a micropip resolve under Node was unreliable: distribution
+  // packages load via Pyodide's internal loader and PyPI wheels via pyfetch,
+  // neither of which passes through a patchable global fetch. The lockfile and
+  // the PyPI API are stable and need no running runtime.
   let lockPackages = {};
   try {
     const lock = JSON.parse(await readFile(join(outDir, 'pyodide-lock.json'), 'utf8'));
-    lockPackages = (lock && lock.packages) || {};
+    lockPackages = lock.packages || {};
   } catch {
     console.warn('  pyodide-lock.json not found; distribution packages cannot be located');
   }
+  const norm = (k) => k.toLowerCase().replace(/[-_.]+/g, '-');
+  const lockIndex = {};
+  for (const k of Object.keys(lockPackages)) lockIndex[norm(k)] = k;
+
+  // Full transitive closure of the roots, pulling deps from the lockfile where
+  // the package is a distribution one.
+  const want = new Set();
+  const visit = (name) => {
+    const key = norm(name);
+    if (want.has(key)) return;
+    want.add(key);
+    const lk = lockIndex[key];
+    if (lk) for (const dep of lockPackages[lk].depends || []) visit(dep);
+  };
+  for (const root of PACKAGES) visit(root);
+
+  // botocore depends on urllib3, python-dateutil, and (transitively) six, all
+  // of which are Pyodide distribution packages. They are not reachable by
+  // walking the lockfile from `jedi` alone, and boto3/botocore's own
+  // dependency metadata lives on PyPI, not here — so name them explicitly and
+  // let visit() pull their lockfile closure (python-dateutil -> six).
+  for (const dep of ['urllib3', 'python-dateutil']) visit(dep);
+
+  // PyPI roots and their deps that are not in the lockfile: botocore,
+  // jmespath, s3transfer. Pure wheels on PyPI.
+  const PYPI_ONLY = ['boto3', 'botocore', 'jmespath', 's3transfer'];
+  for (const p of PYPI_ONLY) want.add(norm(p));
 
   const names = [];
-  const seen = new Set();
 
-  for (const key of Object.keys(installed)) {
-    const entry = installed[key];
-    const source = typeof entry === 'string' ? entry : entry.source || entry.url || '';
-    let absolute = null;
+  async function pypiWheelUrl(pkg) {
+    const res = await fetch(`https://pypi.org/pypi/${pkg}/json`);
+    if (!res.ok) throw new Error(`PyPI ${pkg} -> ${res.status}`);
+    const data = await res.json();
+    const files = data.urls || [];
+    const wheel = files.find((f) => f.packagetype === 'bdist_wheel' && f.filename.endsWith('-py3-none-any.whl'))
+      || files.find((f) => f.packagetype === 'bdist_wheel' && f.filename.includes('-none-any.whl'));
+    if (!wheel) throw new Error(`no pure wheel for ${pkg}`);
+    return { url: wheel.url, name: wheel.filename };
+  }
 
-    if (source && source.startsWith('http') && source.endsWith('.whl')) {
-      // A PyPI wheel: the record already holds the real URL.
-      absolute = source;
-    } else {
-      // A distribution package: look its wheel up in the lockfile and fetch it
-      // from the Pyodide CDN, not PyPI. Key match is case- and separator-
-      // insensitive, since repo names normalize underscores and dashes.
-      const norm = key.toLowerCase().replace(/[-_.]+/g, '-');
-      const lockKey = Object.keys(lockPackages).find(
-        (k) => k.toLowerCase().replace(/[-_.]+/g, '-') === norm,
-      );
-      if (lockKey && lockPackages[lockKey].file_name) {
-        absolute = PYODIDE_CDN + lockPackages[lockKey].file_name;
-      }
-    }
-
-    if (!absolute) {
-      console.warn(`  no wheel url for ${key}; skipping`);
-      continue;
-    }
-    const name = absolute.split('/').pop().split('#')[0];
-    if (!name.endsWith('.whl') || seen.has(name)) continue;
-    seen.add(name);
-
+  for (const key of want) {
     try {
-      const bytes = await download(absolute, join(wheelDir, name));
+      let url, name;
+      const lk = lockIndex[key];
+      if (lk) {
+        name = lockPackages[lk].file_name;
+        url = PYODIDE_CDN + name;
+      } else {
+        ({ url, name } = await pypiWheelUrl(key));
+      }
+      if (names.includes(name)) continue;
+      const bytes = await download(url, join(wheelDir, name));
       names.push(name);
       console.log(`  ${name}  (${(bytes / 1024).toFixed(0)} KB)`);
     } catch (e) {
-      console.warn(`  failed to download ${name}: ${e.message}`);
+      console.warn(`  failed to resolve ${key}: ${e.message}`);
     }
   }
 
-  // The typeahead depends on jedi, and boto3 on its own deps. If any root or a
-  // known-critical dep is missing, say so loudly rather than shipping a broken
-  // workbench.
-  const required = ['boto3', 'botocore', 'jedi', 'jmespath', 's3transfer'];
+  const required = ['boto3', 'botocore', 'jedi', 'jmespath', 's3transfer', 'urllib3'];
   for (const req of required) {
-    const present = names.some((n) => n.toLowerCase().startsWith(req.replace(/-/g, '_')) || n.toLowerCase().startsWith(req));
+    const n = req.replace(/-/g, '_');
+    const present = names.some((f) => norm(f).startsWith(norm(req)) || f.toLowerCase().startsWith(n));
     if (!present) {
-      console.warn(`  WARNING: ${req} did not resolve to a wheel — the workbench will not work without it.`);
+      console.warn(`  WARNING: ${req} missing — the workbench will not work without it.`);
     }
   }
 
   if (names.length === 0) {
-    throw new Error('micropip resolved no wheels. Check the install step above.');
+    throw new Error('resolved no wheels. Check the lockfile and PyPI access above.');
   }
 
   names.sort();
