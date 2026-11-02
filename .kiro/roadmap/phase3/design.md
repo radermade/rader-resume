@@ -71,13 +71,21 @@ Phase 3 lands first, generate it locally and commit it as a stopgap with a note.
 
 ## CloudFront
 
-Behaviors, ordered:
+Behaviors:
 
-1. `/api/*` to the function, short TTL, ETag driven
-2. `/flow/*` and `/fit/*` to the function, no-store (reserved for Phase 6)
-3. `/theme` to the function, no-store
-4. `/static/*` to S3 with OAC, long immutable TTL
-5. `/*` to the function, short TTL
+- `/fit`, `/provenance`, `/provenance/*`, `/api/build`: all methods, caching
+  disabled.
+- Default `/*`: GET and HEAD only, short TTL with ETag revalidation.
+- Later, `/static/*` to S3 with OAC and a long immutable TTL, once Phase 4
+  produces artifacts.
+
+Two things that bit on first deploy and are easy to repeat:
+
+- CloudFront rejects any method a behavior does not list, returning 403 before
+  the request reaches the origin. A read-only default cannot serve a form post,
+  and the error names a configuration problem without naming the method.
+- `ALL_VIEWER_EXCEPT_HOST_HEADER` on every behavior. Forwarding the viewer's
+  Host header to a Function URL origin breaks the request signature.
 
 Once CloudFront fronts the function, the Function URL stops being the public
 entry point and should be restricted.

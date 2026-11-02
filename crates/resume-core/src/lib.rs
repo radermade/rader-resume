@@ -4,16 +4,36 @@
 //! the one place where resume content, validation, and rendering live, which
 //! keeps all of it unit-testable without AWS.
 
+pub mod architecture;
 mod dates;
 mod derived;
+pub mod fit;
+pub mod matching;
+pub mod provenance;
 pub mod render;
 mod slug;
+pub mod tasks;
+pub mod taxonomy;
 mod validate;
 
+// `Node` and `Tier` stay module-scoped. `fit::Tier` is already a score band,
+// and two types called `Tier` in the crate root would make every use site
+// ambiguous to a reader even where the compiler could resolve it.
+pub use architecture::{Architecture, ArchitectureError, Manifest};
 pub use dates::{DateParseError, ImpreciseDate, RoleEnd};
 pub use derived::{TimelineEntry, format_range};
-pub use render::{PageContext, page, robots_txt, sitemap_xml};
+pub use fit::{
+    Assessment, Citation, Dimension, FitError, FitReport, JobDescription, Provenance, Requirement,
+    RequirementSet, Tier, Verdict,
+};
+pub use matching::{aggregate, match_dimension, match_requirement};
+pub use provenance::{Check, CheckKind, CheckResult, CheckRun, Outcome, RunStatus};
+pub use render::{
+    PageContext, content_security_policy, fit_form, fit_report, fit_report_fragment, page,
+    provenance_plan, provenance_run, robots_txt, sitemap_xml, stack_page,
+};
 pub use slug::{Slug, SlugError};
+pub use taxonomy::{Extraction, Taxonomy};
 pub use validate::{ValidationIssue, validate};
 
 use schemars::JsonSchema;
@@ -36,6 +56,19 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// yet; add them if an external consumer needs them.
 pub fn content_schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(Resume)).expect("schema is serializable")
+}
+
+/// Whether a content string is still an unfilled authoring placeholder.
+///
+/// Authored content never contains square brackets. The bracket motif lives in
+/// templates and CSS, not in the record, so a bracket here is a blank.
+///
+/// Shared rather than reimplemented per module, because every consumer must
+/// agree: validation reports placeholders, the provenance planner skips them,
+/// and the fit corpus excludes them. A placeholder that leaks into the corpus
+/// becomes a claim the resume does not make.
+pub fn is_placeholder(text: &str) -> bool {
+    text.contains('[') && text.contains(']')
 }
 
 /// A stable fingerprint of the content, for cache validators.

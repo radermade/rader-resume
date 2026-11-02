@@ -1,0 +1,1149 @@
+{
+  "schemaVersion": 1,
+  "id": "policy-assistant",
+  "name": "EU policy assistant",
+  "summary": "Cited answers from policies that change weekly, inside the EU, with three departments that must not see each other's documents.",
+  "brief": {
+    "whoIsAsking": "An employee at a European manufacturer of about 4,000 people, asking how many weeks of parental leave apply in Germany, whether a customer name may go in a ticket, or what the security standard says about USB drives.",
+    "whatTheyNeedBack": "An answer that names the file and the section it came from. A fluent paraphrase with no citation is not an answer they can act on.",
+    "systemsAlreadyRunning": "HR, legal, and security keep their policies as PDFs. Legal edits a policy most weeks. The assistant is only reachable from the company network, and document text, embeddings, and the model call may not leave the EU.",
+    "breaksWhen": "An answer is fluent, plausible, and sourced from a policy that was superseded in February. One of those retires the assistant, because nobody can then tell which of the correct answers were also stale.",
+    "doneMeans": "An HR employee gets a cited answer from the current HR corpus, a security employee retrieves nothing from the HR-only documents, and a prompt that drops citation quality does not publish."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          {
+            "id": "eu",
+            "label": "EU Region"
+          },
+          {
+            "id": "vpc",
+            "label": "VPC"
+          }
+        ],
+        "nodes": [
+          {
+            "id": "network",
+            "label": "Company network",
+            "flowsTo": [
+              "gateway"
+            ]
+          },
+          {
+            "id": "gateway",
+            "label": "API Gateway",
+            "icon": "api-gateway",
+            "group": "eu",
+            "flowsTo": [
+              "lambda"
+            ]
+          },
+          {
+            "id": "lambda",
+            "label": "AWS Lambda",
+            "icon": "lambda",
+            "group": "vpc",
+            "flowsTo": [
+              "bedrock",
+              "knowledgebase"
+            ]
+          },
+          {
+            "id": "role",
+            "label": "IAM role",
+            "icon": "iam",
+            "group": "vpc"
+          },
+          {
+            "id": "bedrock",
+            "label": "Amazon Bedrock",
+            "icon": "bedrock",
+            "group": "eu"
+          },
+          {
+            "id": "knowledgebase",
+            "label": "Bedrock Knowledge Bases",
+            "icon": "bedrock",
+            "group": "eu",
+            "flowsTo": [
+              "corpus"
+            ]
+          },
+          {
+            "id": "corpus",
+            "label": "Amazon S3",
+            "icon": "s3",
+            "group": "eu"
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Retrieval, not a fine-tune",
+      "decision": "Whether the policy text belongs in the model's weights or behind a retrieval call made at answer time.",
+      "why": "Legal edits a policy most weeks. Training freezes a wording: a model fine-tuned in January still quotes January's leave rules in March, and it cannot name the file it learned them from. Fine-tuning changes how the model behaves; it is the wrong tool when the facts move and the answer must cite a source. Retrieval reads the current file at answer time, so a Tuesday edit is live on Wednesday and the citation is real. This step provisions a knowledge base and its corpus bucket. Nothing here starts a customization job, because a customization is the losing choice.",
+      "snippets": [
+        {
+          "label": "The corpus bucket. EU Region, versioned, private — the store the knowledge base reads from.",
+          "language": "typescript",
+          "source": "const corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});"
+        },
+        {
+          "label": "A knowledge base over that bucket — retrieval, not a training job. There is no CreateModelCustomizationJob here, and that absence is the decision.",
+          "language": "typescript",
+          "source": "const kb = new CfnKnowledgeBase(this, 'PolicyKB', {\n  name: 'policy-assistant',\n  roleArn: kbRole.roleArn,\n  knowledgeBaseConfiguration: {\n    type: 'VECTOR',\n    vectorKnowledgeBaseConfiguration: {\n      embeddingModelArn: titanEmbedArn,\n    },\n  },\n  storageConfiguration: storage,\n});"
+        }
+      ],
+      "infrastructure": "// Retrieval is a knowledge base over the corpus bucket. The thing that is\n// NOT here is the point: no CreateModelCustomizationJob, no fine-tune, no\n// training data. The facts move weekly, so they live in a file the base\n// re-reads, not in weights frozen at training time.\nconst corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the infrastructure for this decision from the snippets on the\n// left. This is a configuration step: there is no AWS call to run, the\n// lesson is the stack you would write.\n//\n// The goal: a private EU corpus bucket and a knowledge base over it —\n// retrieval, not a customization job.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This step configures infrastructure rather than making a call, so there is\nnothing to Run against the intercept. The lesson is what the stack contains\nand, as much, what it does not: no CreateModelCustomizationJob.\n\nThe losing choice is fine-tuning the policy text into a model. It fails the\n`Breaks when` directly: a fine-tuned model would answer fluently from a\nFebruary-superseded policy and could not cite the file, which is exactly the\nstale-but-confident failure that retires the assistant.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnKnowledgeBase",
+            "present": true,
+            "message": "A knowledge base is the retrieval surface. Retrieval reads the current file at answer time, so a weekly edit is live without retraining."
+          },
+          {
+            "pattern": "BLOCK_ALL",
+            "present": true,
+            "message": "The corpus bucket blocks all public access. The policy text is private and read only by the knowledge base role."
+          },
+          {
+            "pattern": "ModelCustomizationJob",
+            "present": false,
+            "message": "No customization job. Fine-tuning freezes the policy wording into weights and cannot cite a file — the stale-but-confident failure this scenario is built against."
+          },
+          {
+            "pattern": "CreateModelCustomizationJob",
+            "present": false,
+            "message": "No fine-tune call anywhere in the stack. The facts move weekly, so they live in a file the base re-reads, not in frozen weights."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The corpus bucket stays in the EU",
+      "decision": "Where the policy PDFs live, and whether their text is ever copied somewhere you do not control.",
+      "why": "The company will not send document text, embeddings, or the model call outside the EU. The corpus bucket is created in an EU Region, with a lifecycle on the documents so superseded versions age out rather than accumulate. The text is not copied into a second bucket, a cache, or a vendor you cannot point at a Region. Residency is a property of where the bytes sit, and the design keeps them in one place you can name. This is configuration: there is no call to run, the lesson is the bucket and its Region.",
+      "snippets": [
+        {
+          "label": "The bucket, pinned to an EU Region by the stack's env. Block all public access and encrypt at rest.",
+          "language": "typescript",
+          "source": "const corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});"
+        },
+        {
+          "label": "A lifecycle rule so superseded policy versions expire. Residency is not an excuse to keep every old PDF forever.",
+          "language": "typescript",
+          "source": "corpus.addLifecycleRule({\n  noncurrentVersionExpiration: Duration.days(90),\n  abortIncompleteMultipartUploadAfter: Duration.days(7),\n});"
+        }
+      ],
+      "infrastructure": "// The stack is deployed to an EU Region (eu-central-1), so a bucket with no\n// explicit region inherits it. The residency requirement is satisfied by\n// where the stack runs, not by a property on the bucket — which is why the\n// stack's env is the thing to check in review.\nconst corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});\ncorpus.addLifecycleRule({ noncurrentVersionExpiration: Duration.days(90) });",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the corpus bucket from the snippets on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: a private, versioned, EU-resident bucket with a lifecycle on\n// superseded policy versions.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Residency lives in two places people forget to check: the Region the stack\ndeploys to (the bucket inherits it) and any second copy of the text. A cache\nor an analytics export that lands the policy text in us-east-1 breaks the EU\nrequirement even though the corpus bucket is correct. The design keeps one\ncopy, in one Region you can name.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "BLOCK_ALL",
+            "present": true,
+            "message": "Public access blocked. The policy PDFs are never reachable from outside the account."
+          },
+          {
+            "pattern": "versioned: true",
+            "present": true,
+            "message": "Versioning on, so a superseded policy is retained as a noncurrent version rather than overwritten and lost."
+          },
+          {
+            "pattern": "noncurrentVersionExpiration",
+            "present": true,
+            "message": "A lifecycle rule expires superseded versions. Residency is not a reason to keep every old PDF forever."
+          },
+          {
+            "pattern": "region:",
+            "present": false,
+            "message": "No hardcoded non-EU region on the bucket. Residency comes from the EU stack env the bucket inherits, which is the thing to check in review — not a per-bucket override."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Parse tables and headings before chunking",
+      "decision": "Whether to turn on advanced parsing before any chunk exists, or let the default text splitter run on the PDFs.",
+      "why": "A leave policy is a table: weeks by circumstance, by Land, by child. Default text splitting reads a PDF as a stream and tears a table down the middle, so a chunk ends up with '156' under the wrong heading. The model then cites a number that was never a policy. Advanced parsing reads the table and the headings as structure before chunking, so a cell stays attached to its row and its heading. This is set on the data source and is a re-ingest to change, so it is decided now, not after the first scrambled answer. Configuration: the lesson is the data-source parsing setting.",
+      "snippets": [
+        {
+          "label": "Advanced parsing on the data source, so tables and headings survive into the chunks.",
+          "language": "typescript",
+          "source": "const dataSource = new CfnDataSource(this, 'PolicyDocs', {\n  knowledgeBaseId: kb.attrKnowledgeBaseId,\n  name: 'policy-pdfs',\n  dataSourceConfiguration: s3Config,\n  vectorIngestionConfiguration: {\n    parsingConfiguration: {\n      parsingStrategy: 'BEDROCK_FOUNDATION_MODEL',\n    },\n  },\n});"
+        }
+      ],
+      "infrastructure": "// Advanced parsing is a property of the data source, not a runtime flag.\n// The default splitter tears tables apart; a leave table split down the\n// middle cites a number that was never a policy. Turning this on is a\n// re-ingest, so it is decided before the corpus is loaded.\nconst dataSource = new CfnDataSource(this, 'PolicyDocs', {\n  knowledgeBaseId: kb.attrKnowledgeBaseId,\n  name: 'policy-pdfs',\n  dataSourceConfiguration: s3Config,\n  vectorIngestionConfiguration: {\n    parsingConfiguration: { parsingStrategy: 'BEDROCK_FOUNDATION_MODEL' },\n  },\n});",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the data source with advanced parsing from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: tables and headings survive parsing, so a leave figure stays\n// attached to the circumstance it applies to.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Parsing is chosen on the data source and locked at ingest. Changing it\nlater means a new data source and a re-ingest, not a config tweak. The\nsymptom of getting it wrong is specific: scrambled numbers from a table,\nwhich is a parser problem, not a prompt or a model problem. See the\n'when the answer is wrong' table in the retrieval steering.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "parsingConfiguration",
+            "present": true,
+            "message": "Advanced parsing is set on the data source, so tables and headings survive into the chunks instead of being torn apart by the default splitter."
+          },
+          {
+            "pattern": "BEDROCK_FOUNDATION_MODEL",
+            "present": true,
+            "message": "The foundation-model parsing strategy reads the table as structure, keeping a leave figure attached to the circumstance it applies to."
+          },
+          {
+            "pattern": "vectorIngestionConfiguration",
+            "present": true,
+            "message": "Parsing lives under the data source's ingestion config, not a runtime flag — it is decided before the corpus is loaded because changing it is a re-ingest."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A managed knowledge base, not a store you run",
+      "decision": "Whether to run the vector store, the ingest workers, and the embedding calls yourself, or let a managed knowledge base own them.",
+      "why": "This is a policy corpus, not a search platform. You are not going to operate an OpenSearch cluster, write the ingest pipeline, and manage the embedding calls for a few hundred PDFs that change weekly. A managed knowledge base is the default for new retrieval: AWS runs the store and the ingest, you point it at the bucket and the embedding model. Bring your own store only when you already operate one or need control the managed store withholds — and here you have neither reason. Choosing a self-run store would be taking on an operational burden the job does not require. Configuration: the lesson is the managed knowledge base and what it saves you from running.",
+      "snippets": [
+        {
+          "label": "A managed vector store — S3 Vectors — so there is no cluster to run. The knowledge base owns ingest and embedding.",
+          "language": "typescript",
+          "source": "const storage = {\n  type: 'S3_VECTORS',\n  s3VectorsConfiguration: {\n    vectorBucketArn: vectorBucket.attrVectorBucketArn,\n    indexName: 'policy-index',\n  },\n};"
+        },
+        {
+          "label": "The knowledge base over the managed store. No ingest workers, no embedding loop in your code.",
+          "language": "typescript",
+          "source": "const kb = new CfnKnowledgeBase(this, 'PolicyKB', {\n  name: 'policy-assistant',\n  roleArn: kbRole.roleArn,\n  knowledgeBaseConfiguration: {\n    type: 'VECTOR',\n    vectorKnowledgeBaseConfiguration: { embeddingModelArn: titanEmbedArn },\n  },\n  storageConfiguration: storage,\n});"
+        }
+      ],
+      "infrastructure": "// Managed is the default for new retrieval: AWS runs the vector store and\n// the ingest. You would bring your own store only to reuse one you already\n// operate or to get control the managed store withholds. A policy corpus\n// needs neither, so running your own would be operational cost for nothing.\nconst storage = {\n  type: 'S3_VECTORS',\n  s3VectorsConfiguration: {\n    vectorBucketArn: vectorBucket.attrVectorBucketArn,\n    indexName: 'policy-index',\n  },\n};",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the managed knowledge base from the snippets on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: AWS runs the store and the ingest; your stack points at the\n// bucket and the embedding model and no more.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The losing choice here is a self-operated store — OpenSearch, pgvector,\nPinecone — picked out of habit. Those earn their place when you already run\nthe store or need hybrid search, rich filters, or a relationship the managed\nstore cannot express. A weekly policy corpus has none of those needs, so the\nmanaged base is the honest default and running your own is undefended cost.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "S3_VECTORS",
+            "present": true,
+            "message": "A managed vector store. AWS runs the store and the ingest; there is no cluster in your account to operate."
+          },
+          {
+            "pattern": "CfnKnowledgeBase",
+            "present": true,
+            "message": "The knowledge base owns ingest and embedding, so there is no embedding loop or ingest worker in your code."
+          },
+          {
+            "pattern": "OpenSearch",
+            "present": false,
+            "message": "No self-run OpenSearch cluster. That is the losing choice for a few hundred weekly-changing PDFs — operational burden the job does not require."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Hierarchical chunking, locked at creation",
+      "decision": "Which chunking strategy the data source uses, chosen once because it is locked when the data source is created.",
+      "why": "A policy section has to stay attached to its heading. Fixed-size chunks split a clause from the heading that scopes it, so a retrieved paragraph loses the 'in Germany' or 'for the second child' that made it an answer. Hierarchical chunking keeps the parent heading with the child passage, which is what a manual or a contract needs. It has more moving parts than fixed-size, and that cost is worth paying here. The strategy is locked when the data source is created: changing it is a new data source, a re-ingest, and a cutover, so it is decided now. Configuration: the lesson is the chunking configuration.",
+      "snippets": [
+        {
+          "label": "Hierarchical chunking on the data source. A policy passage keeps the heading that scopes it.",
+          "language": "typescript",
+          "source": "const chunking = {\n  chunkingStrategy: 'HIERARCHICAL',\n  hierarchicalChunkingConfiguration: {\n    levelConfigurations: [\n      { maxTokens: 1500 },\n      { maxTokens: 300 },\n    ],\n    overlapTokens: 60,\n  },\n};"
+        }
+      ],
+      "infrastructure": "// Chunking is locked at data-source creation. Hierarchical keeps a section\n// attached to its heading, which a leave policy needs: a clause split from\n// 'applies in Germany' is not an answer. Changing this later is a new data\n// source and a re-ingest, so the strategy is chosen before the corpus loads.\nconst chunking = {\n  chunkingStrategy: 'HIERARCHICAL',\n  hierarchicalChunkingConfiguration: {\n    levelConfigurations: [{ maxTokens: 1500 }, { maxTokens: 300 }],\n    overlapTokens: 60,\n  },\n};",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the chunking configuration from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: a policy passage keeps its heading, so a retrieved clause still\n// carries the scope that made it an answer.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Fixed-size is the losing choice for a policy corpus: it shreds a section\nand drops the heading, so 'it increased to 156 weeks' comes back with no\nsubject. The token counts in the snippet are not magic — defaults move.\nThe relationship is what matters: parent heading large enough to hold the\nsection, child small enough to retrieve precisely, a little overlap so a\nboundary fact is in two chunks.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "HIERARCHICAL",
+            "present": true,
+            "message": "Hierarchical chunking keeps a passage attached to the heading that scopes it, so a clause does not lose its 'in Germany' or 'second child'."
+          },
+          {
+            "pattern": "hierarchicalChunkingConfiguration",
+            "present": true,
+            "message": "The parent/child level configuration is present: a large parent holds the section, a small child retrieves precisely."
+          },
+          {
+            "pattern": "overlapTokens",
+            "present": true,
+            "message": "Overlap puts a boundary fact in two chunks, so a figure at a section edge is not lost between them."
+          },
+          {
+            "pattern": "FIXED_SIZE",
+            "present": false,
+            "message": "No fixed-size strategy. It shreds a section and drops the heading, which for a policy clause is the losing choice."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "One embedding model, matching dimension",
+      "decision": "Which embedding model writes the vectors, and that the index dimension matches the width that model writes.",
+      "why": "Query embeddings and document embeddings must use the same model, the same dimension, and the same normalization. Titan Text Embeddings is the default, and the index's vector field is created at the width Titan writes. A second embedding model writes vectors of a different width that the index cannot search: ingestion fails on the dimension, or retrieval returns nonsense. Switching the embedding model later is not a setting change, it is a full rebuild of the index. So the model and the dimension are decided together, once. Configuration: the lesson is the embedding model and the index width agreeing.",
+      "snippets": [
+        {
+          "label": "The embedding model and the index dimension, declared together so they cannot drift apart.",
+          "language": "typescript",
+          "source": "const EMBED_MODEL = 'amazon.titan-embed-text-v2:0';\nconst EMBED_DIM = 1024; // the width Titan v2 writes; the index field is this"
+        },
+        {
+          "label": "The vector index created at that exact width. A mismatch here is an ingestion failure, not a slow query.",
+          "language": "typescript",
+          "source": "const index = {\n  indexName: 'policy-index',\n  fieldMapping: {\n    vectorField: 'embedding',\n    textField: 'text',\n    metadataField: 'metadata',\n  },\n  dimension: EMBED_DIM,\n};"
+        }
+      ],
+      "infrastructure": "// The embedding model and the index dimension are one decision. Titan v2\n// writes 1024-wide vectors; the index field is 1024. A different model\n// writes a different width the index cannot search, and switching later is\n// a full rebuild, not a setting. So they are declared together.\nconst EMBED_MODEL = 'amazon.titan-embed-text-v2:0';\nconst EMBED_DIM = 1024;",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the embedding-model and index-dimension declaration from the\n// snippets on the left. Configuration step: nothing to Run.\n//\n// The goal: the model that writes the vectors and the index that stores\n// them agree on width, because a mismatch fails ingestion.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The failure mode is in the retrieval steering's 'when the answer is wrong'\ntable: 'Ingestion fails on dimension — index mapping and the embedding\nmodel disagree.' The deeper trap is a silent one: changing the embedding\nmodel without rebuilding mixes two vector spaces in one index, and\n'nearest' stops meaning anything. The rebuild is part of the model change,\nnot a later cleanup.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "titan-embed-text-v2",
+            "present": true,
+            "message": "One named embedding model. Query and document vectors must come from the same model, dimension, and normalization."
+          },
+          {
+            "pattern": "1024",
+            "present": true,
+            "message": "The index dimension matches the width Titan v2 writes. A mismatch fails ingestion on dimension, not at query time."
+          },
+          {
+            "pattern": "EMBED_DIM",
+            "present": true,
+            "message": "The width is declared once and referenced by both the model constant and the index, so the two cannot drift apart in a later edit."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Department metadata, filtered before similarity",
+      "decision": "How a department is kept from retrieving another department's documents, and whether that filter runs before or after the similarity search.",
+      "why": "HR can read the leave policy; security cannot. The filter has to run before the similarity search, not after. A prompt instruction to 'only use HR documents' arrives after the security chunks are already in the context — too late. Bedrock reads a sidecar file beside each object (`policy.pdf.metadata.json`) with a `department` attribute, and the Retrieve filter restricts by that attribute before kNN runs. The same key must exist on every object: a missing key makes the filter drop the document silently. Finding a 'close' security paragraph for an HR question is the failure this prevents. Configuration: the lesson is the sidecar and the pre-filter.",
+      "snippets": [
+        {
+          "label": "The sidecar metadata beside each PDF. The same keys on every object, or the filter drops documents silently.",
+          "language": "shell",
+          "source": "# policy.pdf.metadata.json, beside policy.pdf in the corpus bucket\n{\n  \"metadataAttributes\": {\n    \"department\": \"hr\",\n    \"effective_date\": \"2026-01-01\",\n    \"classification\": \"internal\"\n  }\n}"
+        },
+        {
+          "label": "The agent-runtime client and the question. Retrieve lives on bedrock-agent-runtime, the same plane as RetrieveAndGenerate.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\n\nQUESTION = \"How many weeks of parental leave apply in Germany?\""
+        },
+        {
+          "label": "The Retrieve filter restricts by department before similarity. The requester's department, not a prompt instruction.",
+          "language": "python",
+          "source": "found = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n    retrievalConfiguration={\n        \"vectorSearchConfiguration\": {\n            \"filter\": {\"equals\": {\"key\": \"department\", \"value\": \"hr\"}}\n        }\n    },\n)\n\nfor chunk in found[\"retrievalResults\"]:\n    dept = chunk[\"metadata\"][\"department\"]\n    uri = chunk[\"location\"][\"s3Location\"][\"uri\"]\n    print(f\"[{dept}] {uri}\")\n    print(chunk[\"content\"][\"text\"])"
+        }
+      ],
+      "infrastructure": "// The department lives in a sidecar beside each object, ingested as a\n// filterable attribute. Isolation is this filter plus IAM, never a prompt\n// instruction: 'only use HR docs' arrives after the other chunks are\n// already in context. The same key is on every object, or a missing key\n// drops the document without an error.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the filtered Retrieve call from the snippets on the left, then\n# Run. The intercept returns only HR chunks for the HR filter.\n#\n# The goal: a department filter that runs before similarity, so a security\n# paragraph never answers an HR question.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'Filter before similarity' is the whole lesson. A close-but-wrong\ndepartment chunk is a confidentiality failure, not a relevance bug, and it\nmaps straight to the scenario's Breaks when. The other trap is the silent\nmissing key: if one PDF lacks the `department` attribute, the equals filter\nexcludes it with no error, and a real HR document simply never appears.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "Retrieve",
+            "body": {
+              "retrievalResults": [
+                {
+                  "content": {
+                    "text": "Parental leave in Germany: employees are entitled to up to 156 weeks of Elternzeit per child."
+                  },
+                  "location": {
+                    "type": "S3",
+                    "s3Location": {
+                      "uri": "s3://policy-corpus-eu/hr/parental-leave-de-v7.pdf"
+                    }
+                  },
+                  "metadata": {
+                    "department": "hr"
+                  },
+                  "score": 0.83
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Incremental ingest on weekly edits",
+      "decision": "How a weekly policy edit reaches the index, and what happens to the vectors of a policy that was deleted.",
+      "why": "Legal edits a policy most weeks. A full rebuild every Friday means Monday's question is answered from last week's index until the rebuild finishes — you serve Tuesday's PDF on Monday. Incremental ingest starts a job when an object lands, so a changed policy is indexed as it changes. A deleted policy must drop its vectors: retaining the vectors of a deleted document keeps it citable, which is the stale-answer failure wearing a different hat. An EventBridge rule on the bucket triggers StartIngestionJob, and the deletion policy removes vectors for removed objects. Configuration: the lesson is event-driven ingest and the deletion policy.",
+      "snippets": [
+        {
+          "label": "The ingestion job on the control plane. This is the Python to assemble into ingest.py and Run. It is async — the status comes back STARTING, so you poll the job rather than assume it is done. The event-driven trigger that calls this on every upload is in the Infrastructure pane, not here.",
+          "language": "python",
+          "source": "import boto3\n\nagent_build = boto3.client(\"bedrock-agent\", region_name=\"eu-central-1\")\n\njob = agent_build.start_ingestion_job(\n    knowledgeBaseId=\"KB1234567890\",\n    dataSourceId=\"DS1234567890\",\n)\nprint(job[\"ingestionJob\"][\"status\"])"
+        }
+      ],
+      "infrastructure": "// Event-driven ingest: an object lands, a job starts. A nightly or weekly\n// full rebuild serves this morning's superseded policy until it finishes.\n// The deletion policy removes vectors for deleted objects, because a\n// retained vector keeps a withdrawn policy citable — the stale-answer\n// failure again.\ncorpus.addEventNotification(\n  EventType.OBJECT_CREATED,\n  new LambdaDestination(startIngestFn),\n);",
+      "workbench": {
+        "open": "ingest.py",
+        "files": [
+          {
+            "path": "ingest.py",
+            "body": "# Assemble the StartIngestionJob call here from the snippet on the left,\n# then Run. The event-driven trigger that invokes this on every upload is\n# in the Infrastructure pane — it is CDK, not Python, so it stays there.\n#\n# The goal: a changed policy is indexed as it changes, and ingestion is\n# async so the status is STARTING, not COMPLETE.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "StartIngestionJob is on the `bedrock-agent` control-plane client, not the\n`bedrock-agent-runtime` client you Retrieve with — a third client, and\nmixing them up is the same two-planes trap as Retrieve vs Converse. The job\nis asynchronous: the response is STARTING, and you poll for COMPLETE. The\ncost mistake is assuming a full rebuild is fine; the correctness mistake is\nretaining vectors for deleted policies.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent",
+            "operation": "StartIngestionJob",
+            "body": {
+              "ingestionJob": {
+                "knowledgeBaseId": "KB1234567890",
+                "dataSourceId": "DS1234567890",
+                "ingestionJobId": "IJ1234567890",
+                "status": "STARTING"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Retrieve, then Converse",
+      "decision": "Whether the policy text belongs in the weights or behind a retrieval call, and which client each half of that call uses.",
+      "why": "The policy PDF changes most weeks and the answer has to cite that file. Training freezes a wording: a model trained in January is still quoting the old leave rules in March, and it cannot tell you which file it learned them from. Fine-tuning is the right call when the behaviour is wrong, not when the facts move. Retrieve lives on bedrock-agent-runtime; Converse does not. Two planes, two clients, and sending one to the other's address fails with an error that reads like a bad request rather than a wrong destination.",
+      "snippets": [
+        {
+          "label": "Two clients. Retrieve is on the agent runtime; Converse is not.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nQUESTION = \"How many weeks of parental leave apply in Germany?\""
+        },
+        {
+          "label": "Retrieve the policy chunks, and the file each came from.",
+          "language": "python",
+          "source": "found = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n)\n\nfor chunk in found[\"retrievalResults\"]:\n    print(chunk[\"location\"][\"s3Location\"][\"uri\"])\n\ncontext = \"\\n\\n\".join(c[\"content\"][\"text\"] for c in found[\"retrievalResults\"])"
+        },
+        {
+          "label": "Converse on bedrock-runtime. The eu. prefix keeps inference in the EU, and maxTokens is set because an unset cap is how one turn becomes the bill.",
+          "language": "python",
+          "source": "reply = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[\n        {\n            \"role\": \"user\",\n            \"content\": [{\"text\": f\"{context}\\n\\nQuestion: {QUESTION}\"}],\n        }\n    ],\n    inferenceConfig={\"maxTokens\": 512},\n)\n\nprint(reply[\"stopReason\"])\nprint(reply[\"output\"][\"message\"][\"content\"][0][\"text\"])"
+        }
+      ],
+      "infrastructure": "// Retrieval is a knowledge base, not a training job. Nothing here\n// provisions a customization.\nconst corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the call here from the snippets on the left, then Run.\n#\n# The goal: retrieve from the HR knowledge base, then answer the question\n# with Converse, printing the cited file and the reply.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Once the call runs, try breaking it. Each mistake fails differently, and\nthe exception name is the lesson:\n\n1. Drop `modelId` from the Converse call. It is the one required parameter,\n   so botocore rejects the call before it leaves the machine with a\n   ParamValidationError.\n2. Now drop `inferenceConfig` instead, keeping `modelId`. This one does NOT\n   fail: maxTokens is optional, the call is accepted, and an unbounded\n   response is how one turn becomes the bill. The dangerous mistake is the\n   one with no error.\n3. Send Converse to the agent client (`agent.converse(...)`) instead of the\n   runtime client. The agent client has no converse method, so this is an\n   AttributeError in Python, before any request.\n\nA note on what this sandbox cannot show: a `global.` model-id prefix, or any\nother residency or policy violation, is validated server-side at AWS. The\ntransport here is intercepted and never reaches a server, so those calls\nsucceed in the lab even though real AWS would reject them. The sandbox teaches\nrequest shape and client-side validation, not service-side policy.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "Retrieve",
+            "body": {
+              "retrievalResults": [
+                {
+                  "content": {
+                    "text": "Parental leave in Germany: employees are entitled to up to 156 weeks of Elternzeit per child, which may be taken until the child's eighth birthday. Up to 24 months may be deferred."
+                  },
+                  "location": {
+                    "type": "S3",
+                    "s3Location": {
+                      "uri": "s3://policy-corpus-eu/hr/parental-leave-de-v7.pdf"
+                    }
+                  },
+                  "score": 0.82
+                }
+              ]
+            }
+          },
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "text": "German employees may take up to 156 weeks of Elternzeit per child, up to the child's eighth birthday, with up to 24 months deferrable. Source: hr/parental-leave-de-v7.pdf."
+                    }
+                  ]
+                }
+              },
+              "stopReason": "end_turn",
+              "usage": {
+                "inputTokens": 412,
+                "outputTokens": 58,
+                "totalTokens": 470
+              }
+            }
+          }
+        ],
+        "reasons": [
+          {
+            "onException": "ParamValidationError",
+            "whenMessageContains": "modelId",
+            "prose": "modelId is the one required parameter on Converse, so botocore stops this before it leaves the machine, the cheapest place to catch it. Note the contrast with inferenceConfig, which is optional: dropping that raises nothing, and an unbounded response is the cost mistake no exception warns you about."
+          },
+          {
+            "onException": "AttributeError",
+            "whenMessageContains": "converse",
+            "prose": "The agent client has no converse method at all, so this fails as a plain AttributeError before any request is built. Converse lives on bedrock-runtime; Retrieve on bedrock-agent-runtime. Two planes, two clients. The lesson is that the wrong client is wrong in Python, not at the service."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Citations on the answer",
+      "decision": "Whether to hand-build the retrieve-then-prompt-then-cite loop, or let one call return the answer with its citations attached.",
+      "why": "The employee needs the file name, not only a fluent paragraph. RetrieveAndGenerate does the retrieve, the prompt, and the generate in one call and returns the answer with a citations array that names the source each span came from. It is the right tool when you do not need to own the prompt assembly — the assistant's value is the citation, and the managed call attaches it. Retrieve-then-Converse by hand is the choice when you need to shape the prompt yourself; here the citation is the product, so the managed path is simpler and harder to get wrong. It lives on bedrock-agent-runtime, the same plane as Retrieve. A guardrail is opt-in on this call, passed as guardrailConfiguration, not inherited.",
+      "snippets": [
+        {
+          "label": "RetrieveAndGenerate: one call, answer plus citations, on the agent runtime.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\n\nout = agent.retrieve_and_generate(\n    input={\"text\": \"How many weeks of parental leave apply in Germany?\"},\n    retrieveAndGenerateConfiguration={\n        \"type\": \"KNOWLEDGE_BASE\",\n        \"knowledgeBaseConfiguration\": {\n            \"knowledgeBaseId\": \"KB1234567890\",\n            \"modelArn\": \"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n        },\n    },\n)"
+        },
+        {
+          "label": "The answer, then the file each cited span came from. The citation is the point, not a nicety.",
+          "language": "python",
+          "source": "print(out[\"output\"][\"text\"])\n\nfor citation in out[\"citations\"]:\n    for ref in citation[\"retrievedReferences\"]:\n        print(ref[\"location\"][\"s3Location\"][\"uri\"])"
+        }
+      ],
+      "infrastructure": "// RetrieveAndGenerate needs no new infrastructure beyond the knowledge base\n// and the model access already provisioned. The citation array it returns is\n// what makes the answer actionable: a file name the employee can open, not a\n// paraphrase they have to trust.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the RetrieveAndGenerate call from the snippets on the left, then\n# Run. The intercept returns an answer with citations.\n#\n# The goal: one call returns the cited answer, and you print the file each\n# citation points to.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "RetrieveAndGenerate is on bedrock-agent-runtime, the same client as\nRetrieve — Converse is the one on bedrock-runtime. It returns a sessionId;\npass it on the next turn to keep context. A guardrail is NOT applied unless\nyou pass guardrailConfiguration explicitly: the managed call does not\ninherit one. Retrieve and RetrieveAndGenerate are CloudTrail data events, so\na trail of management events misses them — relevant to the logging step.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "RetrieveAndGenerate",
+            "body": {
+              "output": {
+                "text": "German employees may take up to 156 weeks of Elternzeit per child, up to the child's eighth birthday. Source: hr/parental-leave-de-v7.pdf."
+              },
+              "citations": [
+                {
+                  "generatedResponsePart": {
+                    "textResponsePart": {
+                      "text": "up to 156 weeks of Elternzeit"
+                    }
+                  },
+                  "retrievedReferences": [
+                    {
+                      "content": {
+                        "text": "employees are entitled to up to 156 weeks of Elternzeit per child"
+                      },
+                      "location": {
+                        "type": "S3",
+                        "s3Location": {
+                          "uri": "s3://policy-corpus-eu/hr/parental-leave-de-v7.pdf"
+                        }
+                      }
+                    }
+                  ]
+                }
+              ],
+              "sessionId": "session-abc123"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A guardrail, on a published version",
+      "decision": "Whether to ship a guardrail for grounding and prompt-attack, and whether production points at DRAFT or a numbered version.",
+      "why": "Two failures a guardrail covers here: an answer the sources do not support (contextual grounding), and an injection hidden in a retrieved chunk ('ignore your instructions and...'). Grounding needs the sources tagged so it can check the answer against them; prompt-attack coverage runs on the retrieved documents, because indirect injection rides in the corpus, not just the user's text. The version matters: DRAFT is mutable, so production pins a numbered version (1, 2, ...) and a new version is created after every edit. A draft guardrail is not what production calls — a mid-edit DRAFT could change under a live workload. Configuration: the lesson is the guardrail policy and the published version.",
+      "snippets": [
+        {
+          "label": "A guardrail with contextual grounding and prompt-attack filtering. Grounding checks the answer against the sources.",
+          "language": "typescript",
+          "source": "const guardrail = new CfnGuardrail(this, 'PolicyGuardrail', {\n  name: 'policy-assistant',\n  contextualGroundingPolicyConfig: {\n    filtersConfig: [\n      { type: 'GROUNDING', threshold: 0.7 },\n      { type: 'RELEVANCE', threshold: 0.7 },\n    ],\n  },\n  contentPolicyConfig: {\n    filtersConfig: [{ type: 'PROMPT_ATTACK', inputStrength: 'HIGH', outputStrength: 'NONE' }],\n  },\n});"
+        },
+        {
+          "label": "A published version. Production pins this, never DRAFT, because DRAFT changes under you.",
+          "language": "typescript",
+          "source": "const version = new CfnGuardrailVersion(this, 'PolicyGuardrailV1', {\n  guardrailIdentifier: guardrail.attrGuardrailId,\n  description: 'grounding + prompt-attack, policy assistant',\n});"
+        }
+      ],
+      "infrastructure": "// Grounding checks the answer is supported by the retrieved sources;\n// prompt-attack runs on those sources because indirect injection hides in a\n// chunk. Production pins a numbered version: DRAFT is mutable and a mid-edit\n// change would hit a live workload. A version is created after every edit.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the guardrail and its published version from the snippets on\n// the left. Configuration step: nothing to Run.\n//\n// The goal: grounding and prompt-attack policy, pinned to a numbered\n// version that production can call without it shifting underneath.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "A guardrail is a policy on inputs and outputs. It does not retrieve\nknowledge, isolate departments (that is the metadata filter plus IAM), or\nreplace IAM. Grounding needs sources tagged `grounding_source` and the user\ntext tagged `query` when you evaluate selectively; it does not run without\nsources. Thresholds start near 0.7 and tune: too high blocks good answers,\ntoo low lets unsupported claims through. On RetrieveAndGenerate the\nguardrail is opt-in — pass guardrailConfiguration or it is not applied.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "GROUNDING",
+            "present": true,
+            "message": "Contextual grounding checks the answer against the retrieved sources, so an unsupported claim is caught rather than served fluently."
+          },
+          {
+            "pattern": "PROMPT_ATTACK",
+            "present": true,
+            "message": "Prompt-attack filtering covers the injection hidden in a retrieved chunk, not only the user's text — indirect injection rides in the corpus."
+          },
+          {
+            "pattern": "CfnGuardrailVersion",
+            "present": true,
+            "message": "A numbered version is published. Production pins this, so the policy cannot shift under a live workload."
+          },
+          {
+            "pattern": "DRAFT",
+            "present": false,
+            "message": "Production does not reference DRAFT. DRAFT is mutable and a mid-edit change would hit live traffic — a new version is created after every edit."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "IAM for the model, the profile, and the guardrail",
+      "decision": "What the Lambda role may call, scoped to the specific model and inference profile, with the guardrail required by a condition.",
+      "why": "A wildcard model permission is not the design. The role gets bedrock:InvokeModel on the specific foundation-model ARN and the EU inference-profile ARN, not on every model in the account. The guardrail is made mandatory by an IAM condition on bedrock:GuardrailIdentifier, so a caller that omits the guardrail is denied — the guardrail cannot be skipped by forgetting to pass it. This is a policy document, read and reasoned about: the sandbox has no credentials and cannot raise a real AccessDenied, so the lesson is the policy's shape, not a live denial. Configuration: the lesson is the least-privilege policy and the guardrail condition.",
+      "snippets": [
+        {
+          "label": "InvokeModel on the specific model and profile ARNs. Not a wildcard — the blast radius is one model.",
+          "language": "typescript",
+          "source": "role.addToPolicy(new PolicyStatement({\n  actions: ['bedrock:InvokeModel'],\n  resources: [foundationModelArn, euInferenceProfileArn],\n}));"
+        },
+        {
+          "label": "A condition that forces the guardrail. A call without it is denied, so the guardrail is not optional in practice.",
+          "language": "typescript",
+          "source": "role.addToPolicy(new PolicyStatement({\n  actions: ['bedrock:InvokeModel'],\n  resources: [foundationModelArn],\n  conditions: {\n    StringEquals: { 'bedrock:GuardrailIdentifier': publishedGuardrailArn },\n  },\n}));"
+        }
+      ],
+      "infrastructure": "// Least privilege: InvokeModel on the named model and the EU inference\n// profile, never a wildcard. The guardrail is enforced by a condition on\n// bedrock:GuardrailIdentifier, so a caller that drops the guardrail is\n// denied rather than silently unguarded. This is IAM doing what a system\n// prompt cannot.",
+      "workbench": {
+        "open": "policy.ts",
+        "files": [
+          {
+            "path": "policy.ts",
+            "body": "// Assemble the role's policy from the snippets on the left. Configuration\n// step: there are no credentials in the sandbox, so there is nothing to\n// Run — a real AccessDenied needs a real principal at AWS.\n//\n// The goal: InvokeModel scoped to the named model and profile, with the\n// guardrail required by a condition.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is a configuration step by necessity: the sandbox has no AWS\ncredentials and never authorizes against IAM, so it cannot produce a real\nAccessDenied. The lesson is the policy's shape. Two things carry it: the\nresource is the specific model and profile ARN, not `*`; and the condition\non bedrock:GuardrailIdentifier turns 'please remember the guardrail' into\n'the call is denied without it'. Identity is a control; a system prompt is\nnot.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "bedrock:InvokeModel",
+            "present": true,
+            "message": "InvokeModel is granted on named resources, the one action the role needs on the model plane."
+          },
+          {
+            "pattern": "foundationModelArn",
+            "present": true,
+            "message": "The resource is the specific model and inference-profile ARN, so the blast radius of this role is one model, not every model in the account."
+          },
+          {
+            "pattern": "bedrock:GuardrailIdentifier",
+            "present": true,
+            "message": "A condition forces the guardrail: a call that omits it is denied, so the guardrail is not optional in practice. Identity is a control a system prompt is not."
+          },
+          {
+            "pattern": "resources: ['*']",
+            "present": false,
+            "message": "No wildcard resource. A wildcard model permission would let this role call any model, which is not the design."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "PrivateLink to bedrock-runtime",
+      "decision": "Whether the model call from the VPC crosses the public internet or stays on the AWS network.",
+      "why": "The Lambda runs in the VPC, and the call to bedrock-runtime must not leave the AWS network. An interface VPC endpoint (PrivateLink) for bedrock-runtime keeps the traffic private, and an endpoint policy is part of the design, not an afterthought. The classic symptom of getting this wrong is 'works on a laptop, fails in the subnet': the laptop has public egress, the VPC Lambda does not, so the call that worked in testing times out in production. Configuration: the lesson is the endpoint and its policy.",
+      "snippets": [
+        {
+          "label": "An interface endpoint for bedrock-runtime, in the VPC's private subnets. The model call stays on the AWS network.",
+          "language": "typescript",
+          "source": "const bedrockEndpoint = vpc.addInterfaceEndpoint('BedrockRuntime', {\n  service: InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,\n  subnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },\n});"
+        },
+        {
+          "label": "An endpoint policy, so the private path still only allows the calls you intend.",
+          "language": "typescript",
+          "source": "bedrockEndpoint.addToPolicy(new PolicyStatement({\n  principals: [new ArnPrincipal(lambdaRole.roleArn)],\n  actions: ['bedrock:InvokeModel'],\n  resources: [foundationModelArn, euInferenceProfileArn],\n}));"
+        }
+      ],
+      "infrastructure": "// The VPC Lambda reaches Bedrock over an interface endpoint, so the call\n// never touches the public internet. 'Works on a laptop, fails in the\n// subnet' is usually a missing endpoint: the laptop has public egress, the\n// private subnet does not. The endpoint policy is part of the design.\nconst bedrockEndpoint = vpc.addInterfaceEndpoint('BedrockRuntime', {\n  service: InterfaceVpcEndpointAwsService.BEDROCK_RUNTIME,\n  subnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },\n});",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the VPC endpoint and its policy from the snippets on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the model call from the VPC Lambda stays on the AWS network,\n// with an endpoint policy that still scopes what may be called.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This pairs with the residency requirement: keeping the bytes in the EU is\nabout Region, keeping them off the public internet is about the endpoint.\nBoth are true here. The endpoint policy is a second place authorization\nlives — the IAM role says what the principal may do, the endpoint policy\nsays what may traverse this path. A too-open endpoint policy undoes the\nreason for having a private path at all.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "addInterfaceEndpoint",
+            "present": true,
+            "message": "An interface endpoint (PrivateLink) for bedrock-runtime keeps the model call on the AWS network — the fix for 'works on a laptop, fails in the subnet'."
+          },
+          {
+            "pattern": "BEDROCK_RUNTIME",
+            "present": true,
+            "message": "The endpoint targets the bedrock-runtime service, the plane the VPC Lambda's Converse call uses."
+          },
+          {
+            "pattern": "PRIVATE_WITH_EGRESS",
+            "present": true,
+            "message": "The endpoint sits in the private subnets where the Lambda runs, which have no public egress of their own."
+          },
+          {
+            "pattern": "addToPolicy",
+            "present": true,
+            "message": "An endpoint policy scopes what may traverse the private path. A too-open policy undoes the reason for having the endpoint at all."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A gateway in front",
+      "decision": "Whether the employee application holds Bedrock credentials, or a gateway in front holds them and the app calls the gateway.",
+      "why": "The employee-facing application does not hold Bedrock credentials. A gateway — API Gateway in front of the Lambda — is the front door: it authenticates the caller, validates and throttles the request, and the Lambda behind it holds the role that calls Bedrock. The application presents a user token to the gateway and never sees an AWS credential. This keeps the blast radius of a compromised front end to the gateway's surface, not to direct Bedrock access. There are no AWS credentials in a browser, ever. Configuration: the lesson is the gateway as the auth and throttle boundary.",
+      "snippets": [
+        {
+          "label": "API Gateway in front of the handler. The app calls this; it does not call Bedrock.",
+          "language": "typescript",
+          "source": "const api = new RestApi(this, 'PolicyApi', {\n  defaultCorsPreflightOptions: { allowOrigins: ['https://assistant.internal'] },\n});\nconst ask = api.root.addResource('ask');\nask.addMethod('POST', new LambdaIntegration(handler), {\n  authorizer: cognitoAuthorizer,\n});"
+        },
+        {
+          "label": "A throttle on the method, so a loop in a client cannot drive the token bill.",
+          "language": "typescript",
+          "source": "const plan = api.addUsagePlan('AskPlan', {\n  throttle: { rateLimit: 10, burstLimit: 20 },\n});\nplan.addApiStage({ stage: api.deploymentStage });"
+        }
+      ],
+      "infrastructure": "// The app presents a user token to the gateway; the Lambda behind it holds\n// the Bedrock role. The application never sees an AWS credential, which is\n// the rule: no AWS credentials in a browser, ever. The gateway is where\n// auth, validation, and throttling live.\nconst api = new RestApi(this, 'PolicyApi', {});\nconst ask = api.root.addResource('ask');\nask.addMethod('POST', new LambdaIntegration(handler), { authorizer: cognitoAuthorizer });",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the gateway and its throttle from the snippets on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the application authenticates to the gateway and never holds a\n// Bedrock credential; the Lambda behind it does.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The gateway owns the jobs the model call must not: authentication,\nrequest validation, and throttling. Reach for API Gateway specifically when\nyou need those — a plain function URL would make you rebuild them. The\nthrottle is also a cost control: a client loop behind an unthrottled\nendpoint is a token bill, which ties back to the maxTokens and\nThrottlingException concerns elsewhere in this build.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "authorizer",
+            "present": true,
+            "message": "The method authenticates the caller. The app presents a user token to the gateway; the Lambda behind it holds the Bedrock role."
+          },
+          {
+            "pattern": "addUsagePlan",
+            "present": true,
+            "message": "A throttle caps the request rate, so a client loop cannot drive the token bill — a cost control as much as an availability one."
+          },
+          {
+            "pattern": "throttle",
+            "present": true,
+            "message": "Rate and burst limits are set. API Gateway earns its place here precisely because it provides auth, validation, and throttling a function URL would make you rebuild."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The prompt is a versioned template",
+      "decision": "Whether the prompt lives as a string edited in the Lambda, or as a versioned, reviewable template the code references by id.",
+      "why": "Editing a prompt string inside the Lambda is not how a prompt change is reviewed: it rides in a code deploy, with no record of who changed the words or why, and no way to roll back the prompt without rolling back the code. Bedrock Prompt Management holds the prompt as a shared, versioned, parameterized template with an approval step. The code references a prompt id and version, so a prompt change is its own reviewed artifact with its own history. This matters because a 'no change' deploy that quietly altered the prompt is a classic cause of a quality drop nobody can explain. Configuration: the lesson is the managed prompt and the version reference.",
+      "snippets": [
+        {
+          "label": "The prompt as a managed, versioned template — not a string in the handler.",
+          "language": "typescript",
+          "source": "const prompt = new CfnPrompt(this, 'PolicyPrompt', {\n  name: 'policy-answer',\n  variants: [{\n    name: 'v1',\n    templateType: 'TEXT',\n    templateConfiguration: {\n      text: { text: 'Answer only from the sources. Cite the file. {{context}} Question: {{question}}' },\n    },\n  }],\n});"
+        },
+        {
+          "label": "A published version the code pins by id. A prompt change is a new version, reviewed, not a code edit.",
+          "language": "typescript",
+          "source": "const promptVersion = new CfnPromptVersion(this, 'PolicyPromptV1', {\n  promptArn: prompt.attrArn,\n  description: 'cite-the-file answer prompt, v1',\n});"
+        }
+      ],
+      "infrastructure": "// The prompt is a managed template with versions, referenced by id. A\n// string edited in the Lambda hides who changed the words and couples the\n// prompt to a code rollback. A 'no change' deploy that silently moved the\n// prompt is a known cause of an unexplained quality drop — versioning is\n// what makes that reviewable.\nconst prompt = new CfnPrompt(this, 'PolicyPrompt', { name: 'policy-answer', variants: [promptVariant] });",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the managed prompt and its version from the snippets on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: the prompt is a versioned artifact the code references by id,\n// so a prompt change is reviewed and rollback-able on its own.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Prompt Management owns the shared, versioned prompt and its approval.\nAppConfig is the lighter cousin when you only need to swap a prompt id or\nmodel id without a redeploy. Either way the point is the same: the prompt\nis configuration with a history, not a literal buried in a handler. This is\nwhy the troubleshooting guide lists 'a prompt variable or AppConfig' as the\nfirst suspect for a quality change after a deploy that 'changed nothing'.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnPrompt",
+            "present": true,
+            "message": "The prompt is a managed template, not a string edited in the handler, so a prompt change is its own reviewed artifact."
+          },
+          {
+            "pattern": "CfnPromptVersion",
+            "present": true,
+            "message": "A published version the code pins by id. A prompt change is a new version, reviewed, not a code edit riding in a deploy."
+          },
+          {
+            "pattern": "{{context}}",
+            "present": true,
+            "message": "The template is parameterized, so the context and question are injected rather than concatenated into a literal."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Score retrieval and the answer separately",
+      "decision": "Whether evaluation treats the system as one accuracy number, or scores retrieval and generation as separate layers.",
+      "why": "Open-ended generation has no single accuracy. A good paragraph on the wrong file is a retrieval failure, not a model failure, and a single blended score hides which half broke. The four numbers that locate a retrieval failure are context recall (were the needed facts retrieved), context precision (were they buried in junk), faithfulness (did the answer stick to the context), and answer relevance (did it address the question). Scoring them separately tells you whether to fix the filter, the chunking, or the prompt. Configuration: the lesson is the eval layers and what each isolates.",
+      "snippets": [
+        {
+          "label": "The eval config scores retrieval and generation as separate metric sets, not one number.",
+          "language": "typescript",
+          "source": "const evalConfig = {\n  retrieval: ['contextRecall', 'contextPrecision'],\n  generation: ['faithfulness', 'answerRelevance'],\n  dataset: 's3://policy-corpus-eu/eval/golden-set.jsonl',\n};"
+        },
+        {
+          "label": "A frozen golden set with the config recorded, so a regression is comparable run to run.",
+          "language": "typescript",
+          "source": "const record = {\n  modelId: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0',\n  promptVersion: 'v1',\n  k: 5,\n  chunking: 'hierarchical',\n  date: '2026-11-02',\n};"
+        }
+      ],
+      "infrastructure": "// Evaluation is two layers, not one score. Retrieval: context recall and\n// precision. Generation: faithfulness and answer relevance. A good answer\n// on the wrong file scores high on fluency and fails faithfulness, which\n// tells you the retrieval filter broke, not the model. Freeze the dataset\n// and record model, prompt version, k, and chunk config with every run.",
+      "workbench": {
+        "open": "eval.ts",
+        "files": [
+          {
+            "path": "eval.ts",
+            "body": "// Assemble the eval configuration from the snippets on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: retrieval and generation scored separately, on a frozen golden\n// set, with the config recorded so runs are comparable.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The 2x2 that locates the failure: if the context is relevant and the answer\nfollows it, retrieval is working; if the context is relevant and the answer\nignores it, fix the prompt or add grounding; if the context is not relevant\nand the answer follows it, fix retrieval (the model was loyal to junk);\nboth wrong means fix both. BLEU and ROUGE are weak primary scores for chat.\nA judge model is cheap and biased toward its own style — calibrate it on a\nhuman sample before it gates a release. Keep safety regressions separate\nfrom quality regressions.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "contextRecall",
+            "present": true,
+            "message": "Retrieval is scored on its own: context recall asks whether the needed facts were retrieved at all."
+          },
+          {
+            "pattern": "faithfulness",
+            "present": true,
+            "message": "Generation is scored separately: faithfulness asks whether the answer stuck to the retrieved context. A good paragraph on the wrong file fails here, not on fluency."
+          },
+          {
+            "pattern": "golden-set",
+            "present": true,
+            "message": "A frozen golden set makes a regression comparable run to run, with the model, prompt version, k, and chunking recorded."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Invocation logs, encrypted, watched",
+      "decision": "Whether invocation logging is on, how the raw prompts and completions are protected, and whether guardrail trace is on in production.",
+      "why": "Invocation logging is off until you enable it, and the logs hold the raw prompt and completion — which for this assistant includes the employee's question, possibly with a name or a case detail. So the log group is encrypted with a customer-managed KMS key, the readers are least-privilege, retention is set, and Macie watches any S3 export because the logs can still hold the raw question. Guardrail trace is disabled in production: trace returns the matched span, including the sensitive text it matched, which is a debugging tool, not a production setting. Configuration: the lesson is logging on, encrypted, with trace off.",
+      "snippets": [
+        {
+          "label": "Invocation logging on, to an encrypted log destination. Off by default, and the payload is sensitive.",
+          "language": "typescript",
+          "source": "new CfnModelInvocationLoggingConfiguration(this, 'InvokeLogs', {\n  loggingConfig: {\n    cloudWatchConfig: {\n      logGroupName: logs.logGroupName,\n      roleArn: logRole.roleArn,\n    },\n    textDataDeliveryEnabled: true,\n  },\n});"
+        },
+        {
+          "label": "Macie on the export bucket, because an encrypted log can still contain the raw question.",
+          "language": "typescript",
+          "source": "new CfnClassificationJob(this, 'LogMacie', {\n  jobType: 'SCHEDULED',\n  s3JobDefinition: { bucketDefinitions: [{ accountId, buckets: [logExportBucket.bucketName] }] },\n});"
+        }
+      ],
+      "infrastructure": "// Invocation logging is off until enabled and the payload holds the raw\n// prompt and completion. Encrypt the log group with a customer-managed KMS\n// key, least-privilege the readers, set retention, and run Macie on any S3\n// export. Guardrail trace stays disabled in production: it returns the\n// sensitive span it matched, which is for debugging, not live traffic.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the invocation-logging and Macie configuration from the\n// snippets on the left. Configuration step: nothing to Run.\n//\n// The goal: logging on and encrypted, readers scoped, Macie on the export,\n// guardrail trace off in production.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two logging facts that trip people: invocation logging is off by default,\nso 'why is there no prompt in the logs' is usually that nobody enabled it;\nand CloudTrail data events prove the API was called but do not contain a\nreadable prompt — the invocation log is where the body lives. Anonymize and\nblock change the API response, not the log, so the log can still hold raw\nPII. That is why it is encrypted, short-retained, and watched by Macie.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnModelInvocationLoggingConfiguration",
+            "present": true,
+            "message": "Invocation logging is explicitly enabled. It is off by default, so without this there is no prompt or completion in the logs at all."
+          },
+          {
+            "pattern": "CfnClassificationJob",
+            "present": true,
+            "message": "Macie watches any S3 export, because an encrypted log can still contain the employee's raw question."
+          },
+          {
+            "pattern": "guardrailTrace",
+            "present": false,
+            "message": "Guardrail trace is not enabled in production. Trace returns the sensitive span it matched — a debugging tool, not a live setting."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The publish gate blocks on an eval drop",
+      "decision": "Whether a prompt or model change ships because someone approved the words, or because the eval held.",
+      "why": "A prompt that cites worse than the last version does not ship because a human read it and liked it. The pipeline runs the eval set and blocks the publish when the score drops below the current version's. The gate is in CI, not a person running commands: a human approves intent, the eval approves quality, and the deploy is held on the eval, not the approval. This is what keeps a confident-but-worse prompt from reaching an employee — the same discipline the resume pipeline uses, applied to the model layer. Configuration: the lesson is the eval gate in the pipeline.",
+      "snippets": [
+        {
+          "label": "The pipeline stage runs the eval and fails the build when the score regresses.",
+          "language": "typescript",
+          "source": "new CodeBuildStep('Eval', {\n  commands: [\n    'python run_eval.py --dataset golden-set.jsonl --out scores.json',\n    'python gate.py --scores scores.json --baseline baseline.json',\n  ],\n});\n// gate.py exits non-zero when faithfulness or recall drops below baseline"
+        }
+      ],
+      "infrastructure": "// The eval is a pipeline gate: run the golden set, compare to the current\n// version's baseline, fail the build on a regression. The deploy is held on\n// the number, not on someone approving the words. A prompt that reads well\n// and cites worse is exactly the failure a human reviewer waves through and\n// the eval catches.",
+      "workbench": {
+        "open": "pipeline.ts",
+        "files": [
+          {
+            "path": "pipeline.ts",
+            "body": "// Assemble the eval gate from the snippet on the left. Configuration step:\n// nothing to Run.\n//\n// The goal: the pipeline blocks a publish when the eval regresses, so\n// quality is enforced by the number, not by approval.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This closes the loop with the separate-scoring step: you measured retrieval\nand generation separately so a regression is attributable, and here the\npipeline refuses to publish when one of those numbers drops. Keep safety\nregressions on their own gate — a toxicity or PII regression blocks\nregardless of quality. The gate is code in the pipeline, which is the\nproject's standing rule: the pipeline is the only writer, and a human runs\nno deploy commands.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "run_eval.py",
+            "present": true,
+            "message": "The pipeline runs the eval set as a build step, so quality is measured on every change rather than eyeballed."
+          },
+          {
+            "pattern": "gate.py",
+            "present": true,
+            "message": "A gate compares the score to the current version's baseline and fails the build on a regression. The deploy is held on the number, not on someone approving the words."
+          },
+          {
+            "pattern": "baseline",
+            "present": true,
+            "message": "The gate reads a baseline, so a confident-but-worse prompt that a human reviewer would wave through is blocked by the comparison."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "ThrottlingException is a quota question first",
+      "decision": "What you check first when the assistant starts returning ThrottlingException at a request rate that seems low.",
+      "why": "A ThrottlingException at a low request rate is not a signal to wrap the call in a tighter retry loop — a retry storm makes it worse. The first look is the account quota and the model: Bedrock quota is measured in tokens per minute, not requests per second, so a handful of long-context calls can exhaust it while the request count looks tiny. Compare CloudWatch token usage against Service Quotas. Then set maxTokens to stop over-reservation, spread burst with a cross-Region profile inside the geography, smooth with a queue, and move to provisioned throughput only when utilization sits at the cap. This is a diagnosis step: the sandbox never calls AWS, so it cannot produce a real throttle — the lesson is the order you investigate.",
+      "snippets": [
+        {
+          "label": "The diagnosis, as the order you actually check. Throttling is retryable — but find the cause before you retry harder.",
+          "language": "python",
+          "source": "# 1. Tokens per minute, not requests per second. A few long calls exhaust a\n#    token quota while the request count looks tiny.\n# 2. Compare CloudWatch input+output tokens against Service Quotas.\n# 3. Set maxTokens so a call does not over-reserve capacity.\n# 4. Spread burst with a cross-Region (eu.) profile; smooth with SQS.\n# 5. Provisioned throughput only when utilization sits at the cap.\nMAX_TOKENS = 512  # bound the reservation, not just the output"
+        }
+      ],
+      "infrastructure": "// There is no infrastructure to add for a throttle — the fix is quota,\n// request shape, and spread, in that order. Provisioned throughput is a\n// commitment you make only when on-demand utilization is pinned at the cap,\n// not the first reach for an intermittent throttle.",
+      "workbench": {
+        "open": "diagnosis.md",
+        "files": [
+          {
+            "path": "diagnosis.md",
+            "body": "# ThrottlingException at a low request rate\n\nAssemble the diagnosis order from the snippet on the left into your notes.\nThis is a diagnosis step: the sandbox never reaches AWS, so there is no real\nthrottle to reproduce. The lesson is the order you investigate.\n\nThe seeded symptom: 12 requests a minute, each with a large retrieved\ncontext, intermittently throttled. The request count is a red herring — the\ntoken rate is the real signal.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "ThrottlingException is on the retry-with-backoff side of the table, unlike\nValidationException or AccessDenied. But retrying harder without checking\nthe cause is a retry storm. The quota is tokens per minute: this is why the\nmaxTokens decision back in the Converse step was also a capacity decision,\nnot only a cost one. A cross-Region profile spreads burst inside the EU;\nit is not a discount and it is not a quota increase.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "Tokens per minute",
+            "present": true,
+            "message": "The first check is the token quota, not the request count. A few long-context calls exhaust a token-per-minute quota while the request rate looks tiny."
+          },
+          {
+            "pattern": "Service Quotas",
+            "present": true,
+            "message": "The diagnosis compares CloudWatch token usage against Service Quotas before touching retry behavior."
+          },
+          {
+            "pattern": "MAX_TOKENS",
+            "present": true,
+            "message": "Bounding maxTokens stops a call over-reserving capacity — the same decision as the Converse step, here as a capacity fix, not only a cost one."
+          },
+          {
+            "pattern": "Provisioned throughput",
+            "present": true,
+            "message": "Provisioned throughput is last, a commitment made only when on-demand utilization sits at the cap — not the first reach for an intermittent throttle."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "When the right document never comes back",
+      "decision": "Where you look when the answer is wrong because retrieval failed — the empty result or the wrong department's text — before you blame the prompt or the model.",
+      "why": "This is the failure the whole build is designed against: an answer that is fluent and sourced from the wrong place, or no answer because the right document never came back. When retrieval fails, the prompt and the model are the last things to check, not the first. Check the filter (is the department filter excluding the right document, or is a missing metadata key dropping it silently), the ingest (did the policy actually get indexed, or is the sync behind), and the embedding model (did it change without a rebuild, leaving two vector spaces mixed). A good paragraph on the wrong file is a retrieval failure, not a model failure. This is the diagnosis step that ties every earlier decision to its failure mode.",
+      "snippets": [
+        {
+          "label": "The retrieval-failure checklist, in order. The prompt and model are last, not first.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\nQUESTION = \"How many weeks of parental leave apply in Germany?\"\n\n# Right document never comes back, or the wrong department's text does:\n# 1. The filter. A missing `department` key drops a document silently.\n# 2. The ingest. Is the policy indexed, or is the sync behind?\n# 3. The embedding model. Changed without a rebuild = two mixed spaces.\n# Only after those: the prompt, lost-in-the-middle, k too high, grounding.\nfound = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n)\nprint(len(found[\"retrievalResults\"]), \"chunks\")  # zero is the tell"
+        }
+      ],
+      "infrastructure": "// Nothing new to provision. This step is the diagnosis that connects the\n// earlier decisions to their failure modes: the metadata filter, the\n// incremental ingest, and the embedding dimension are the first three\n// things to check, in that order, before the prompt.",
+      "workbench": {
+        "open": "diagnosis.py",
+        "files": [
+          {
+            "path": "diagnosis.py",
+            "body": "# Assemble the Retrieve call from the snippet on the left and Run it. The\n# intercept returns an empty result set — the failure this step is about.\n#\n# The goal: see zero chunks come back, and read the checklist in order:\n# filter, ingest, embedding — then, and only then, the prompt.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "An empty retrieval is the scenario's Breaks when made visible: the\nassistant that cannot find the current policy is the one nobody can trust,\nbecause a confident answer from a superseded file looks identical to a\ncorrect one. The retrieval steering's 'when the answer is wrong' table is\nthe full version of this checklist. The ordering is the lesson: retrieval\nfailures are filter, ingest, and embedding problems far more often than\nprompt problems, and checking the prompt first wastes the investigation.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "Retrieve",
+            "body": {
+              "retrievalResults": []
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

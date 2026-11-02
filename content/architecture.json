@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 2,
+  "summary": "Every read is a server-rendered response from one Rust binary behind CloudFront. Nothing is always on, and the only persistent state is a disposable table of check runs.",
+  "tiers": [
+    {
+      "id": "visitor",
+      "label": "Visitor",
+      "nodes": [
+        {
+          "id": "browser",
+          "label": "Browser",
+          "role": "Reads HTML. No JavaScript is required for any content on this site.",
+          "flowsTo": ["route53"]
+        }
+      ]
+    },
+    {
+      "id": "edge",
+      "label": "Edge",
+      "nodes": [
+        {
+          "id": "route53",
+          "label": "Route 53",
+          "role": "Alias records at the apex, which is why DNS lives here rather than at the registrar.",
+          "resourceType": "AWS::Route53::RecordSet",
+          "flowsTo": ["cloudfront"]
+        },
+        {
+          "id": "cloudfront",
+          "label": "CloudFront",
+          "role": "Behaviour precedence is load-bearing: the POST endpoints are ordered ahead of the read-only default, which allows only GET and HEAD.",
+          "resourceType": "AWS::CloudFront::Distribution",
+          "flowsTo": ["function-url", "cache-policy"]
+        },
+        {
+          "id": "cache-policy",
+          "label": "Cache policy",
+          "role": "Short TTL with ETag revalidation for HTML. Per-visitor responses are no-store, not briefly cached.",
+          "resourceType": "AWS::CloudFront::CachePolicy"
+        }
+      ]
+    },
+    {
+      "id": "request",
+      "label": "Request path",
+      "nodes": [
+        {
+          "id": "function-url",
+          "label": "Function URL",
+          "role": "No API Gateway. Nothing here needs a custom authorizer, usage plan, or request validation.",
+          "resourceType": "AWS::Lambda::Url",
+          "flowsTo": ["site-handler"]
+        },
+        {
+          "id": "site-handler",
+          "label": "site-handler",
+          "role": "One Rust binary routing every page and API path with axum. arm64 on provided.al2023.",
+          "resourceType": "AWS::Lambda::Function",
+          "flowsTo": ["fit-workflow", "provenance-workflow", "runs-table"]
+        }
+      ]
+    },
+    {
+      "id": "orchestration",
+      "label": "Orchestration",
+      "nodes": [
+        {
+          "id": "fit-workflow",
+          "label": "Fit workflow",
+          "role": "Express, invoked synchronously. Extract, then four parallel matchers that each apply a different rule, then aggregate.",
+          "resourceType": "AWS::StepFunctions::StateMachine",
+          "flowsTo": ["task-functions"]
+        },
+        {
+          "id": "provenance-workflow",
+          "label": "Provenance workflow",
+          "role": "Standard and asynchronous, because a dozen outbound checks with timeouts will not finish inside a request.",
+          "resourceType": "AWS::StepFunctions::StateMachine",
+          "flowsTo": ["task-functions"]
+        },
+        {
+          "id": "task-functions",
+          "label": "Task functions",
+          "role": "One binary per workflow, dispatching on a tagged payload. The matchers are pure compute with identical permissions, so separate artifacts would be copies.",
+          "resourceType": "AWS::Lambda::Function",
+          "flowsTo": ["runs-table"]
+        }
+      ]
+    },
+    {
+      "id": "state",
+      "label": "State",
+      "nodes": [
+        {
+          "id": "runs-table",
+          "label": "Runs table",
+          "role": "Check-run projections, on-demand, with a TTL on every item. Reads render from the projection and make zero Step Functions calls.",
+          "resourceType": "AWS::DynamoDB::Table"
+        }
+      ]
+    },
+    {
+      "id": "operations",
+      "label": "Operations",
+      "nodes": [
+        {
+          "id": "log-groups",
+          "label": "Log groups",
+          "role": "Retention set explicitly on every one. The default never expires and becomes the largest line item on a project this size.",
+          "resourceType": "AWS::Logs::LogGroup"
+        },
+        {
+          "id": "alarms",
+          "label": "Alarms",
+          "role": "Failed executions on both workflows, plus handler errors and throttles. The fit workflow falls back to inline analysis, so without an alarm a broken workflow is invisible.",
+          "resourceType": "AWS::CloudWatch::Alarm",
+          "flowsTo": ["alert-topic"]
+        },
+        {
+          "id": "alert-topic",
+          "label": "Alert topic",
+          "role": "One topic for the stack. The subscriber address comes from deploy context, never from a file in the repository.",
+          "resourceType": "AWS::SNS::Topic"
+        }
+      ]
+    },
+    {
+      "id": "delivery",
+      "label": "Delivery",
+      "nodes": [
+        {
+          "id": "github-actions",
+          "label": "GitHub Actions",
+          "role": "Assumes a deploy role by OIDC. No long-lived access keys exist in the repository or in CI secrets."
+        },
+        {
+          "id": "certificate",
+          "label": "ACM certificate",
+          "role": "A separate stack in us-east-1, because CloudFront accepts certificates from no other region."
+        }
+      ]
+    }
+  ]
+}

@@ -199,6 +199,275 @@ p {
   margin-block-end: var(--space-4);
 }
 
+/* Architecture diagram on /stack.
+
+   Inline SVG, with every coordinate computed in Rust from the content
+   document. Styling lives here so the drawing themes from the same tokens as
+   everything else and prints correctly, rather than carrying hard-coded fills
+   in markup. */
+.diagram {
+  /* Narrow screens scroll the drawing rather than shrinking the labels into
+     illegibility. The component list below is the readable fallback, so this
+     is a convenience rather than the only way in. */
+  overflow-x: auto;
+  margin-block: var(--space-4);
+  padding-block: var(--space-2);
+}
+
+/* The aspect ratio comes from the layout, inline, because only the renderer
+   knows the canvas dimensions. Everything else about the drawing is here. */
+.diagram__frame {
+  position: relative;
+  /* Below this the captions stop being readable, so the wrapper scrolls. */
+  min-inline-size: 32rem;
+}
+
+/* Stretched to fill the frame. Safe because the frame carries the canvas
+   aspect ratio, so there is no distortion to introduce. */
+.diagram__canvas {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.diagram__edges path {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+  /* The SVG is stretched, so a uniform stroke would scale unevenly. */
+  vector-effect: non-scaling-stroke;
+}
+
+.diagram__tier {
+  position: absolute;
+  inset-inline-start: 0;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* The button is the hexagon's box: sized as a percentage of the canvas so it
+   scales with the connectors, and centred exactly on the computed point. The
+   caption and the popover hang off it absolutely, so neither affects that
+   centring and neither is clipped by the hexagon's clip-path. */
+.diagram__node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  /* inline-size is generated from the canvas width. The aspect ratio has to
+     be declared here: every child is absolutely positioned, so without it the
+     button has no content to take its height from, collapses to nothing, and
+     the caption's `calc(100% + …)` resolves against zero and lands on top of
+     the hexagon. */
+  aspect-ratio: 1.1547;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: help;
+}
+
+/* Lifts the whole node, popover included, above its siblings. Without this
+   the popover renders behind any node later in document order, because each
+   node is its own positioned element and z-index inside one cannot escape it. */
+.diagram__node:hover,
+.diagram__node:focus-visible {
+  z-index: 2;
+}
+
+/* Warm is structure, per the two-accent rule: these are the things that run.
+   The clip-path is repeated rather than taken from `.hex`, because `.hex`
+   also carries a fixed `inline-size` and a grid display meant for the
+   portrait frame, and inheriting those here produced a shape that did not
+   fill its box. */
+.diagram__shape {
+  position: absolute;
+  inset: 0;
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+  background-color: var(--accent-warm);
+}
+
+.diagram__node--external .diagram__shape {
+  background-color: var(--border);
+}
+
+.diagram__label {
+  position: absolute;
+  inset-block-start: calc(100% + 0.3rem);
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  inline-size: 9rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.25;
+  text-align: center;
+  color: var(--text);
+  /* Connectors pass behind captions on their way between tiers; a solid
+     backing makes that read as behind rather than through. */
+  background-color: var(--surface);
+}
+
+.diagram__node--external .diagram__label {
+  color: var(--text-muted);
+}
+
+.diagram__node--external .diagram__label {
+  color: var(--text-muted);
+}
+
+/* The popover. Hidden by visibility rather than display so it stays in the
+   accessibility tree for the aria-describedby reference. */
+.diagram__about {
+  position: absolute;
+  z-index: 1;
+  inline-size: 17rem;
+  inset-block-start: calc(100% + var(--space-2));
+  visibility: hidden;
+  opacity: 0;
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  text-align: start;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+}
+
+/* Hover and focus both, which is the whole point: a tap focuses, so the
+   detail is reachable without a pointer that can hover. */
+.diagram__node:hover .diagram__about,
+.diagram__node:focus-visible .diagram__about {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* Opens upward near the bottom of the canvas, and aligns inward near an edge.
+   Chosen at render time from the node's position, since nothing measures a
+   collision without script. */
+.diagram__node--flip .diagram__about {
+  inset-block-start: auto;
+  inset-block-end: calc(100% + var(--space-2));
+}
+
+.diagram__node--start .diagram__about {
+  inset-inline-start: 0;
+}
+
+.diagram__node--end .diagram__about {
+  inset-inline-end: 0;
+}
+
+.diagram__about-role {
+  color: var(--text);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.diagram__about-type {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  overflow-wrap: anywhere;
+}
+
+.components summary {
+  color: var(--accent-cool);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  cursor: pointer;
+  padding-block: var(--space-2);
+}
+
+.tiers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.tier {
+  background-color: var(--surface);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+}
+
+.tier__label {
+  margin-block: 0 var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.nodes {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+}
+
+.node {
+  display: flex;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+/* The hexagon marks a thing that runs. Sized small here because it is a
+   bullet, not a portrait frame; it inherits the clip-path from .hex. */
+.node__badge {
+  inline-size: 1.75rem;
+  background-color: var(--accent-warm);
+}
+
+/* Outside the stack, so it reads as a boundary rather than a component we
+   deploy. Cool is interactive everywhere else, so this uses the border
+   colour instead of borrowing an accent. */
+.node--external .node__badge {
+  background-color: var(--border);
+}
+
+.node__body {
+  min-inline-size: 0;
+}
+
+.node__body p {
+  margin-block-end: var(--space-1);
+}
+
+.node__body code {
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.manifest {
+  margin-block-end: var(--space-5);
+}
+
+/* Manifests are shown verbatim, which means long lines. Scroll the block
+   rather than wrapping TOML at arbitrary points, and cap the height so one
+   file cannot bury the rest of the page. */
+.manifest__body {
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin: 0;
+  max-block-size: 28rem;
+  overflow: auto;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
 footer {
   max-width: 54rem;
   margin: var(--space-6) auto 0;
@@ -278,5 +547,271 @@ footer {
     content: " (" attr(href) ")";
     font-size: 0.85em;
     color: var(--text-muted);
+  }
+}
+
+/* Provenance check */
+
+.scope-note {
+  border-inline-start: 2px solid var(--accent-warm);
+  padding-inline-start: var(--space-3);
+  color: var(--text-muted);
+}
+
+.check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.check-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding-block: var(--space-2);
+  border-block-end: 1px solid var(--border);
+}
+
+.check-label {
+  flex: 1 1 18rem;
+}
+
+.outcome {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding-inline: var(--space-2);
+  padding-block: 0.1rem;
+  border-radius: var(--radius);
+  border: 1px solid currentcolor;
+}
+
+/* Colour alone never carries the meaning: each badge states its outcome in
+   text, so this is reinforcement rather than information. */
+.outcome--passed {
+  color: var(--accent-cool);
+}
+
+.outcome--unreachable {
+  color: var(--text-muted);
+}
+
+.outcome--mismatch {
+  color: var(--accent-warm);
+}
+
+.outcome--skipped {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+.progress {
+  inline-size: 100%;
+  block-size: 0.5rem;
+  margin-block: var(--space-3);
+}
+
+button {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--surface-sunken);
+  background-color: var(--accent-cool);
+  border: 1px solid var(--accent-cool);
+  border-radius: var(--radius);
+  padding-inline: var(--space-3);
+  padding-block: var(--space-2);
+  cursor: pointer;
+}
+
+button:hover {
+  background-color: transparent;
+  color: var(--accent-cool);
+}
+
+@media print {
+  .scope-note,
+  .progress,
+  button,
+  form {
+    display: none;
+  }
+}
+
+/* Fit analysis */
+
+.fit-form {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: start;
+}
+
+.fit-form label {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+textarea {
+  inline-size: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--text);
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  resize: vertical;
+}
+
+textarea:focus-visible {
+  border-color: var(--accent-cool);
+}
+
+/* Cited resume text, so a claim can be checked rather than trusted. */
+.citations {
+  flex-basis: 100%;
+  margin-block: var(--space-2) 0;
+  padding-inline-start: var(--space-3);
+  border-inline-start: 1px solid var(--border);
+  list-style: none;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.citations li {
+  margin-block-end: var(--space-1);
+  padding-block: 0;
+  border: none;
+}
+
+/* Fit modal. The standalone /fit page is the fallback, so none of this is
+   load-bearing for the feature working. */
+
+.button-link {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--accent-cool);
+  text-decoration: none;
+  border: 1px solid var(--accent-cool);
+  border-radius: var(--radius);
+  padding-inline: var(--space-3);
+  padding-block: var(--space-2);
+}
+
+.button-link:hover,
+.button-link:focus-visible {
+  background-color: var(--accent-cool);
+  color: var(--surface-sunken);
+}
+
+.fit-dialog {
+  inline-size: min(46rem, calc(100vw - 2rem));
+  color: var(--text);
+  background-color: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+}
+
+.fit-dialog::backdrop {
+  background-color: rgb(0 0 0 / 0.6);
+}
+
+.fit-dialog h2 {
+  margin-block-start: 0;
+}
+
+/* A report is much taller than the form it replaces, so the dialog scrolls
+   rather than growing past the viewport and stranding the close button off
+   screen. Capped against the small viewport unit so mobile browser chrome
+   cannot hide the top of it. */
+#fit-dialog-result {
+  max-block-size: min(70svh, 40rem);
+  overflow-y: auto;
+  /* Focus moves here after a swap, so the ring has to be visible rather than
+     clipped against the content. */
+  outline-offset: 4px;
+}
+
+/* Nested in the dialog, so the report's own headings start a level down and
+   should not shout at the dialog's title. */
+#fit-dialog-result h2 {
+  font-size: 1.15rem;
+}
+
+#fit-dialog-result h3 {
+  font-size: 1rem;
+  color: var(--accent-warm);
+}
+
+/* The report carries its own trailing scope note; the dialog does not need
+   the extra block margin the page version gets. */
+#fit-dialog-result > :last-child {
+  margin-block-end: 0;
+}
+
+.fit-dialog[aria-busy="true"] button[type="submit"] {
+  opacity: 0.6;
+}
+
+.fit-dialog__dismiss {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.fit-dialog__dismiss button {
+  font-size: 1.25rem;
+  line-height: 1;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  padding: var(--space-1);
+}
+
+.fit-dialog__dismiss button:hover {
+  color: var(--text);
+}
+
+/* Drop target feedback. Text only; files are out of scope. */
+textarea.is-dropping {
+  border-color: var(--accent-warm);
+  border-style: dashed;
+}
+
+@media print {
+  .fit-dialog,
+  .button-link {
+    display: none;
+  }
+
+  /* Paper has no hover and no disclosure triangle, so the detail that lives
+     in popovers on screen has to be laid out flat here or it is simply gone.
+     The reference section is revealed regardless of whether it was opened. */
+  .components > *:not(summary) {
+    display: block !important;
+  }
+
+  .components summary {
+    display: none;
+  }
+
+  /* Popovers would print stacked on top of the drawing. The reference above
+     carries the same text. */
+  .diagram__about {
+    display: none;
+  }
+}
+
+/* A visitor who prefers less motion still gets the popover; it just appears
+   rather than fading. Nothing here animates by default, so this only matters
+   if a transition is ever added above. */
+@media (prefers-reduced-motion: reduce) {
+  .diagram__about {
+    transition: none;
   }
 }

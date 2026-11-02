@@ -7,6 +7,18 @@ infra/*.d.ts
 .DS_Store
 ._*
 
+# The vendored Pyodide runtime and wheels: multi-megabyte binaries fetched by
+# assets/gen-ai/vendor-pyodide.mjs. Not committed — too large for git, and the
+# commit still fully determines what ships through the pinned PYODIDE_VERSION
+# and WHEELS list in workbench.js plus the lockfile kept below, the same shape
+# as package-lock.json plus node_modules. CI runs the vendor script before
+# synth so the deploy is reproducible from a commit without the bytes in git.
+/assets/gen-ai/pyodide/*
+# Keep the lockfile: it is the text record of exactly what the binaries are,
+# so a resolve is reproducible and reviewable even though the wheels are not
+# in the repo.
+!/assets/gen-ai/pyodide/pyodide-lock.json
+
 # Reference material only, kept locally. Git tracked this as a gitlink because
 # it carries its own .git directory, so its contents were never committed
 # anyway. Deliberately excluded: it contains a real phone number, a personal
