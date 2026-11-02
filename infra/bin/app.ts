@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { App, Tags } from 'aws-cdk-lib';
 import { CertificateStack } from '../lib/certificate-stack';
+import { GithubOidcStack } from '../lib/github-oidc-stack';
 import { SiteStack } from '../lib/site-stack';
 import { targetEnv } from '../lib/target-env';
 
@@ -8,6 +9,17 @@ const app = new App();
 const stage = app.node.tryGetContext('stage') ?? 'dev';
 const domainName = app.node.tryGetContext('domainName');
 const hostedZoneId = app.node.tryGetContext('hostedZoneId');
+
+// The GitHub OIDC deploy role. Deployed once, manually, from local
+// credentials — it is what CI authenticates with, so CI cannot create it.
+// owner/repo default to this project; the GitHub Actions environment the
+// `deploy` job declares (`environment: dev` in ci.yml) must match, because
+// the trust policy pins the token subject to it. existingProviderArn lets a
+// second stage reuse the one OIDC provider an account is allowed.
+const githubOwner = app.node.tryGetContext('githubOwner') ?? 'radermade';
+const githubRepo = app.node.tryGetContext('githubRepo') ?? 'rader-resume';
+const githubEnvironment = app.node.tryGetContext('githubEnvironment') ?? stage;
+const existingProviderArn = app.node.tryGetContext('oidcProviderArn');
 
 // Where alarms go. Context rather than a literal, because it is a personal
 // address and content files carry no contact details. Absent, the topic and
@@ -43,6 +55,15 @@ Tags.of(site).add('component', 'site');
 if (cert) {
   Tags.of(cert).add('component', 'cert');
 }
+
+const oidc = new GithubOidcStack(app, `rader-resume-github-oidc-${githubEnvironment}`, {
+  owner: githubOwner,
+  repo: githubRepo,
+  environment: githubEnvironment,
+  existingProviderArn,
+  env,
+});
+Tags.of(oidc).add('component', 'github-oidc');
 
 Tags.of(app).add('project', 'rader-resume');
 Tags.of(app).add('stage', stage);
