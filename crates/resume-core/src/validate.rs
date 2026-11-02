@@ -21,12 +21,7 @@ impl ValidationIssue {
     }
 }
 
-/// Authored content never contains square brackets. The bracket motif lives in
-/// templates and CSS, not in the record, so a bracket here is an unfilled
-/// placeholder.
-fn is_placeholder(text: &str) -> bool {
-    text.contains('[') && text.contains(']')
-}
+use crate::is_placeholder;
 
 /// Returns an issue if a field is unfit to publish.
 ///

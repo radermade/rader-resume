@@ -32,9 +32,17 @@ unsafe_code = "forbid"
 - One HTTP binary. All web routes, the public read API, and the flow endpoints
   live in it and route internally. A function per route buys nothing here and
   costs cold starts, deploy complexity, and a second place for auth to live.
-- One binary per Step Functions task state. These have genuinely different IAM,
-  memory, and timeout needs, and separate artifacts keep retries and failures
-  attributable.
+- One binary per Step Functions task state, where the states have genuinely
+  different IAM, memory, or timeout needs. Separate artifacts keep retries and
+  failures attributable.
+- The exception, and it is the rationale rather than a loophole: when a group
+  of states is pure compute with no AWS permissions and identical resource
+  needs, one binary dispatching on a tagged payload beats several near-identical
+  crates. Failure isolation and per-branch timing come from separate
+  invocations, not separate artifacts. The fit workflow's extract, four
+  matchers, and aggregate are one binary for this reason; the publish pipeline's
+  tasks are not, because they touch different buckets with different
+  permissions.
 - Multiple binaries is a build-target decision, not an application-count
   decision. There is one app in one workspace.
 

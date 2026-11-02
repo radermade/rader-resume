@@ -1,0 +1,677 @@
+/* The GenAI lab's own token set.
+   Shares no custom property with the resume. Neither app is the other's
+   fallback, so a change to one cannot drift the other. */
+:root {
+  /* Two surfaces. The terminal is the void; the lesson sits just above it. */
+  --lab-void: #000000;
+  --lab-surface: #0d0f12;
+  --lab-raised: #16191f;
+  --lab-border: #262b33;
+
+  --lab-text: #d7dae0;
+  --lab-text-muted: #9aa0ab;
+
+  /* Pulled off pure #f0f and #0ff deliberately. Fully saturated magenta on
+     black passes contrast but fringes on subpixel rendering at small
+     monospace sizes and is tiring to read a command in. These measure near
+     9:1 and 13:1 and still read as a terminal.
+
+     Fixed jobs, the same discipline the resume applies to its pair: magenta
+     is the prompt, cyan is anything typed or typeable. Never the reverse. */
+  --lab-prompt: #ff4fd8;
+  --lab-code: #4fe3ff;
+
+  --lab-space-1: 0.25rem;
+  --lab-space-2: 0.5rem;
+  --lab-space-3: 1rem;
+  --lab-space-4: 1.5rem;
+  --lab-space-5: 2.5rem;
+  --lab-space-6: 4rem;
+
+  --lab-radius: 3px;
+  --lab-measure: 70ch;
+
+  --lab-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas,
+    monospace;
+  --lab-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--lab-surface);
+  color: var(--lab-text);
+  font-family: var(--lab-sans);
+  line-height: 1.55;
+}
+
+a {
+  color: var(--lab-code);
+}
+
+:focus-visible {
+  outline: 2px solid var(--lab-prompt);
+  outline-offset: 2px;
+}
+
+code,
+pre {
+  font-family: var(--lab-mono);
+}
+
+/* --- Landing ------------------------------------------------------------ */
+
+/* A split: the banner on the left, the projects on the right. Collapses to
+   one column on a narrow screen rather than shrinking the banner into
+   illegibility. */
+.lab-landing {
+  min-block-size: 100vh;
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 60rem) {
+  .lab-landing {
+    grid-template-columns: 1.3fr 1fr;
+  }
+}
+
+.lab-banner {
+  background-color: var(--lab-void);
+  padding: var(--lab-space-6) var(--lab-space-5);
+  display: grid;
+  align-content: center;
+  gap: var(--lab-space-3);
+}
+
+.lab-banner pre {
+  margin: 0;
+  color: var(--lab-code);
+  font-size: clamp(0.5rem, 1.6vw, 0.9rem);
+  line-height: 1.15;
+  overflow-x: auto;
+}
+
+/* GENAI is the magenta word in the banner. */
+.lab-banner__accent {
+  color: var(--lab-prompt);
+}
+
+.lab-prompt {
+  margin: 0;
+  color: var(--lab-prompt);
+  font-family: var(--lab-mono);
+  font-size: 0.875rem;
+}
+
+.lab-projects {
+  padding: var(--lab-space-6) var(--lab-space-5);
+}
+
+.lab-projects h1 {
+  margin-block: 0 var(--lab-space-4);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--lab-text-muted);
+}
+
+.lab-projects ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--lab-space-3);
+}
+
+.lab-project a {
+  display: block;
+  padding: var(--lab-space-3);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  color: var(--lab-code);
+  font-family: var(--lab-mono);
+  text-decoration: none;
+}
+
+.lab-project a:hover {
+  border-color: var(--lab-prompt);
+}
+
+.lab-project p {
+  margin-block: var(--lab-space-2) 0;
+  max-width: var(--lab-measure);
+  color: var(--lab-text-muted);
+  font-family: var(--lab-sans);
+  font-size: 0.875rem;
+}
+
+/* --- Lesson ------------------------------------------------------------- */
+
+/* The lesson fills the box `.lab-step` gives it. On the overview that is the
+   whole width; on a call step it is the left grid track. It sets no width or
+   outer padding of its own, so the two cases do not double up. */
+.lab-lesson {
+  min-inline-size: 0;
+}
+
+.lab-lesson h1 {
+  margin-block: 0 var(--lab-space-2);
+  font-size: 1.5rem;
+}
+
+.lab-step-title {
+  margin-block: 0 var(--lab-space-4);
+  color: var(--lab-prompt);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.06em;
+}
+
+/* The job. Stays on screen for the whole project: a step that is only a
+   product name is not a step, and the brief is what makes it a decision. */
+.lab-brief {
+  background-color: var(--lab-raised);
+  border-radius: var(--lab-radius);
+  padding: var(--lab-space-4);
+  margin-block-end: var(--lab-space-5);
+  display: grid;
+  gap: var(--lab-space-3);
+}
+
+.lab-brief div {
+  display: grid;
+  gap: var(--lab-space-1);
+}
+
+.lab-brief dt,
+.lab-brief__label {
+  color: var(--lab-text-muted);
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.lab-brief p {
+  margin: 0;
+  max-width: var(--lab-measure);
+}
+
+/* The failure that ends the design, marked so it is not read as one more
+   paragraph of context. */
+.lab-brief__breaks {
+  border-inline-start: 2px solid var(--lab-prompt);
+  padding-inline-start: var(--lab-space-3);
+}
+
+.lab-index {
+  list-style: none;
+  margin-block: 0 var(--lab-space-5);
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lab-space-2);
+}
+
+.lab-index li {
+  font-family: var(--lab-mono);
+  font-size: 0.75rem;
+  color: var(--lab-text-muted);
+}
+
+.lab-index li[aria-current="step"] {
+  color: var(--lab-prompt);
+}
+
+.lab-pane {
+  margin-block-end: var(--lab-space-5);
+}
+
+.lab-pane h2 {
+  margin-block: 0 var(--lab-space-2);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lab-text-muted);
+}
+
+.lab-pane p {
+  margin-block: 0 var(--lab-space-3);
+  max-width: var(--lab-measure);
+}
+
+/* Code and infrastructure are terminal surfaces, like the banner and the
+   console. Cyan on black, because both are things you type or read as a
+   command. */
+.lab-code {
+  background-color: var(--lab-void);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  padding: var(--lab-space-3);
+  margin: 0;
+  overflow-x: auto;
+  color: var(--lab-code);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.lab-snippet {
+  margin-block-end: var(--lab-space-4);
+}
+
+/* The language of each snippet, shown so a visitor knows what they are
+   reading before they paste it. A monospace chip ahead of the label. */
+.lab-snippet__lang {
+  display: inline-block;
+  margin-inline-end: var(--lab-space-2);
+  padding: 0 var(--lab-space-2);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--lab-text-muted);
+}
+
+/* A snippet shown for context in a runnable step that is not the editor's
+   language: the shell sidecar beside a PDF, a CDK trigger. Dimmed and marked
+   so it is not assembled into the .py file and run. This is the structural
+   guard against the step-9 failure, where a CDK snippet pasted into a Python
+   editor raised a SyntaxError on Run. */
+.lab-snippet--reference .lab-code {
+  opacity: 0.7;
+  border-style: dashed;
+}
+
+.lab-snippet__ref {
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  color: var(--lab-text-muted);
+}
+
+.lab-nav {
+  display: flex;
+  gap: var(--lab-space-3);
+  align-items: center;
+  margin-block-start: var(--lab-space-5);
+  padding-block-start: var(--lab-space-3);
+  border-block-start: 1px solid var(--lab-border);
+}
+
+.lab-nav button {
+  padding: var(--lab-space-2) var(--lab-space-3);
+  background-color: transparent;
+  color: var(--lab-code);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.lab-nav button:hover:not(:disabled) {
+  border-color: var(--lab-prompt);
+}
+
+.lab-nav button:disabled {
+  color: var(--lab-text-muted);
+  cursor: default;
+}
+
+.lab-nav a {
+  margin-inline-start: auto;
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+}
+
+/* --- Diagram ------------------------------------------------------------ */
+
+/* A light drawing on the dark lesson. Positions are generated into the hashed
+   style block, keyed by id: the policy hashes that block and does not cover
+   `style` attributes, so attribute positioning would need `'unsafe-hashes'`. */
+.lab-diagram {
+  overflow-x: auto;
+  margin-block: var(--lab-space-4) var(--lab-space-5);
+}
+
+.lab-diagram__frame {
+  position: relative;
+  min-inline-size: 32rem;
+}
+
+.lab-diagram__canvas {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.lab-diagram__edges path {
+  fill: none;
+  stroke: var(--lab-border);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Dashed groups mark the Region and the VPC. Decorative outline; the label is
+   the text. */
+.lab-group {
+  position: absolute;
+  border: 1px dashed var(--lab-border);
+  border-radius: var(--lab-radius);
+}
+
+.lab-group__label {
+  position: absolute;
+  inset-block-start: var(--lab-space-1);
+  inset-inline-start: var(--lab-space-2);
+  color: var(--lab-text-muted);
+  font-family: var(--lab-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* The node is the shape's box: sized as a percentage of the canvas so it
+   scales with the connectors, and centred on the computed point. The caption
+   hangs below it absolutely, so it neither shifts that centring nor gets
+   clipped. An explicit aspect-ratio is required: every child is absolutely
+   positioned, so without it the box collapses and the caption lands on the
+   shape. */
+.lab-node {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background-color: var(--lab-raised);
+  border: 1px solid var(--lab-code);
+  border-radius: var(--lab-radius);
+}
+
+/* The product icon sits inside the node box, filling most of it. Decorative:
+   the caption below is the label, so this is aria-hidden in the markup. Sized
+   by this class, not an inline style, so the hashed-stylesheet CSP rule holds. */
+.lab-node__icon {
+  inline-size: 70%;
+  block-size: 70%;
+  object-fit: contain;
+}
+
+.lab-node__caption {
+  position: absolute;
+  inset-block-start: calc(100% + 0.35rem);
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+  inline-size: 9rem;
+  text-align: center;
+  color: var(--lab-text);
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  line-height: 1.25;
+  /* Connectors pass behind captions between levels; a solid backing makes
+     that read as behind rather than through. */
+  background-color: var(--lab-surface);
+}
+
+/* Outside the account, so it reads as a boundary rather than something
+   deployed. */
+.lab-node--external {
+  border-color: var(--lab-border);
+  border-style: dashed;
+}
+
+/* --- Workbench ---------------------------------------------------------- */
+
+/* One column on the overview, two from a call step. The modifier class is on
+   the container so the overview has no empty track to style around. */
+.lab-step {
+  max-width: 76rem;
+  margin-inline: auto;
+  padding: var(--lab-space-5) var(--lab-space-4);
+}
+
+@media (min-width: 72rem) {
+  .lab-step--working {
+    max-width: 104rem;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    gap: var(--lab-space-5);
+    align-items: start;
+  }
+
+  /* The lesson is the swap target and scrolls with the page. The workbench
+     sticks, so the editor stays in view while the lesson is read. */
+  .lab-step--working .lab-workbench {
+    position: sticky;
+    top: var(--lab-space-4);
+  }
+}
+
+.lab-workbench {
+  display: grid;
+  gap: var(--lab-space-3);
+  background-color: var(--lab-void);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  padding: var(--lab-space-3);
+}
+
+/* The empty mounts the asset fills. Each has a minimum height so the column
+   does not collapse before the runtime loads, and the whole thing reads as a
+   terminal while it does. */
+.lab-files,
+.lab-editor,
+.lab-output,
+.lab-cli {
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  color: var(--lab-code);
+}
+
+.lab-editor {
+  min-block-size: 18rem;
+}
+
+.lab-output {
+  min-block-size: 6rem;
+  color: var(--lab-text);
+  white-space: pre-wrap;
+}
+
+/* The file tree the asset mounts. */
+.lab-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lab-space-1);
+}
+
+.lab-file-list button {
+  background: transparent;
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  padding: var(--lab-space-1) var(--lab-space-2);
+  color: var(--lab-code);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* The open file. aria-pressed is the source of truth; the colour follows it
+   so the state is not encoded by colour alone. */
+.lab-file-list button[aria-pressed='true'] {
+  border-color: var(--lab-prompt);
+  color: var(--lab-prompt);
+}
+
+/* Editor: a textarea with a line-number gutter. The gutter scrolls in step
+   with the textarea, synced in script, because a traceback names a line. */
+.lab-editor__wrap {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  background-color: var(--lab-void);
+}
+
+.lab-editor__gutter {
+  margin: 0;
+  padding: var(--lab-space-2);
+  text-align: end;
+  color: var(--lab-text-muted);
+  background-color: var(--lab-surface);
+  white-space: pre;
+  overflow: hidden;
+  user-select: none;
+  min-block-size: 16rem;
+}
+
+.lab-editor__area {
+  margin: 0;
+  padding: var(--lab-space-2);
+  border: none;
+  resize: vertical;
+  background-color: var(--lab-void);
+  color: var(--lab-code);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  tab-size: 4;
+  min-block-size: 16rem;
+}
+
+.lab-editor__gutter,
+.lab-editor__area {
+  /* Line boxes have to match or the gutter drifts from the code. */
+  line-height: 1.5;
+  font-size: 0.8125rem;
+}
+
+/* Typeahead dropdown. Positioned under the caret from script via CSS custom
+   properties set on the element's CSSOM style, which CSP's style-src does not
+   govern (only `style` attributes and `<style>` elements do), so the policy
+   stays as tight as it was. The wrap is the positioning context. */
+.lab-complete {
+  position: absolute;
+  z-index: 5;
+  inset-block-start: var(--lab-complete-top, 0);
+  inset-inline-start: var(--lab-complete-left, 0);
+  margin: 0;
+  padding: var(--lab-space-1);
+  list-style: none;
+  max-block-size: 14rem;
+  overflow-y: auto;
+  min-inline-size: 12rem;
+  background-color: var(--lab-raised);
+  border: 1px solid var(--lab-prompt);
+  border-radius: var(--lab-radius);
+  box-shadow: 0 6px 16px rgb(0 0 0 / 0.5);
+}
+
+.lab-complete__item {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--lab-space-3);
+  align-items: baseline;
+  padding: var(--lab-space-1) var(--lab-space-2);
+  border-radius: var(--lab-radius);
+  cursor: pointer;
+}
+
+/* The highlighted row. aria-selected is the source of truth; the background
+   follows it, so the state is not colour alone. */
+.lab-complete__item.is-active,
+.lab-complete__item[aria-selected='true'] {
+  background-color: var(--lab-void);
+}
+
+.lab-complete__name {
+  color: var(--lab-code);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+}
+
+.lab-complete__kind {
+  color: var(--lab-text-muted);
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+}
+
+.lab-run,
+.lab-stop {
+  margin-block-start: var(--lab-space-2);
+  margin-inline-end: var(--lab-space-2);
+  padding: var(--lab-space-2) var(--lab-space-3);
+  background-color: transparent;
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.lab-run {
+  color: var(--lab-prompt);
+  border-color: var(--lab-prompt);
+}
+
+.lab-stop {
+  color: var(--lab-code);
+}
+
+.lab-stop:disabled {
+  color: var(--lab-text-muted);
+  border-color: var(--lab-border);
+  cursor: default;
+}
+
+.lab-cli__form {
+  display: flex;
+  gap: var(--lab-space-2);
+  align-items: baseline;
+}
+
+.lab-cli__prompt {
+  color: var(--lab-prompt);
+}
+
+.lab-cli__input {
+  flex: 1;
+  min-inline-size: 0;
+  background-color: var(--lab-void);
+  border: 1px solid var(--lab-border);
+  border-radius: var(--lab-radius);
+  padding: var(--lab-space-1) var(--lab-space-2);
+  color: var(--lab-code);
+  font-family: var(--lab-mono);
+  font-size: 0.8125rem;
+}
+
+/* The no-script fallback, and the loading state before the asset mounts. A
+   readable starting file rather than a blank pane. */
+.lab-workbench noscript .lab-code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
