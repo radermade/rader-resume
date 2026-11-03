@@ -5,6 +5,7 @@
 //! keeps all of it unit-testable without AWS.
 
 pub mod architecture;
+pub mod assets;
 mod dates;
 mod derived;
 pub mod fit;

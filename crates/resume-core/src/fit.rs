@@ -635,10 +635,19 @@ mod tests {
 
         assert!(entries.len() > 20);
         assert!(entries.iter().all(|entry| !entry.text.is_empty()));
-        assert!(
-            entries
-                .iter()
-                .any(|entry| matches!(entry.citation, Citation::ProjectHighlight { .. }))
+
+        // The corpus cites project highlights when the document has any. The
+        // resume currently ships no projects (the self-referential one was
+        // removed), so this asserts coverage conditionally: if a project with
+        // highlights exists, the corpus must cite it; with none, there is
+        // nothing to cite and that is correct, not a regression.
+        let has_project_highlight = resume.projects.iter().any(|p| !p.highlights.is_empty());
+        let corpus_cites_a_project = entries
+            .iter()
+            .any(|entry| matches!(entry.citation, Citation::ProjectHighlight { .. }));
+        assert_eq!(
+            has_project_highlight, corpus_cites_a_project,
+            "the corpus must cite a project highlight exactly when the document has one"
         );
     }
 

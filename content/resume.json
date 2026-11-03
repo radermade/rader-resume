@@ -5,7 +5,7 @@
     "preferredName": "Matt",
     "headline": "Frontend Engineer | AI Prompt Engineering | AWS Solutions Architecture",
     "location": "Kansas City, MO",
-    "email": "[contact-email]",
+    "email": "radermade@gmail.com",
     "links": [
       { "label": "GitHub", "url": "[github-url]" },
       { "label": "LinkedIn", "url": "[linkedin-url]" },
@@ -175,21 +175,7 @@
       ]
     }
   ],
-  "projects": [
-    {
-      "slug": "living-resume-platform",
-      "name": "Living Resume and Portfolio Platform",
-      "status": "in progress",
-      "url": "[site-url]",
-      "repo": "[repo-url]",
-      "summary": "Serverless resume and portfolio built in Rust on AWS Lambda. Server-rendered with axum and maud behind CloudFront, with git as the source of truth and Step Functions orchestrating publishing, scheduled content enrichment, and a visitor-facing interactive flow using the callback pattern.",
-      "highlights": [
-        "Designed a publish pipeline where artifacts are immutable and keyed by commit SHA, making rollback a manifest pointer flip rather than a rebuild.",
-        "Used Step Functions for the workflows that are genuinely stateful, with a CQRS-style read projection so page rendering never queries execution state.",
-        "Built on a least-privilege, no-always-on-compute footprint."
-      ]
-    }
-  ],
+  "projects": [],
   "certifications": [
     {
       "slug": "faa-part-107",

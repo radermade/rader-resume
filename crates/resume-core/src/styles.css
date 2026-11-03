@@ -2,21 +2,28 @@
    Extract to a content-hashed asset if it outgrows that. */
 
 :root {
-  /* Dark is the default, not a toggle away from light. */
-  --surface-sunken: #141414;
-  --surface: #242424;
-  --surface-raised: #2f3948;
-  --border: #32363a;
+  /* The GenAI lab's terminal palette, adopted here so the two apps read as one
+     product. Values are copied from the lab's `--lab-*` tokens into the
+     resume's own semantic names — the two token sets stay independent (neither
+     app is the other's fallback), so this is a value remap, not a shared
+     property. Dark is the default; there is no light screen variant (the lab
+     has none to port), only the print block below, which stays light for paper. */
+  --surface-sunken: #000000; /* lab --lab-void */
+  --surface: #0d0f12; /* lab --lab-surface */
+  --surface-raised: #16191f; /* lab --lab-raised */
+  --border: #262b33; /* lab --lab-border */
 
-  --text: #cfd0d0;
-  /* Lifted from the old site's #898989, which measured ~4.4:1 on --surface
-     and missed AA for body text by one hex step. */
-  --text-muted: #9a9a9a;
+  --text: #d7dae0; /* lab --lab-text */
+  --text-muted: #9aa0ab; /* lab --lab-text-muted, clears 4.5:1 on the surfaces here */
 
-  /* Two accents with distinct jobs. Warm is structure, cool is interactive,
-     never the reverse. Consistency is what makes this read as designed. */
-  --accent-warm: #df966c;
-  --accent-cool: #6fafd3;
+  /* Two accents with fixed, distinct jobs. The names predate the reskin and
+     now hold the lab's pair: --accent-warm is the magenta "structure" accent
+     (headings, the bracket motif), --accent-cool the cyan "interactive" one
+     (links, buttons, focus). Structure vs. interactive, never the reverse —
+     the same split the lab enforces. Renaming would churn every component rule
+     for no behavioural gain, so the jobs are documented rather than renamed. */
+  --accent-warm: #ff4fd8; /* lab --lab-prompt — structure */
+  --accent-cool: #4fe3ff; /* lab --lab-code — interactive */
 
   --space-1: 0.25rem;
   --space-2: 0.5rem;
@@ -34,23 +41,13 @@
     sans-serif;
 }
 
-/* A separate token set, not an inversion. Inverting a dark palette produces
-   washed-out accents every time, so these are darkened to clear 4.5:1 on a
-   light surface. */
-@media (prefers-color-scheme: light) {
-  :root {
-    --surface-sunken: #f4f3f1;
-    --surface: #ffffff;
-    --surface-raised: #e9ebee;
-    --border: #d9d6d2;
-
-    --text: #1b1b1b;
-    --text-muted: #585858;
-
-    --accent-warm: #a1512a;
-    --accent-cool: #1d5c83;
-  }
-}
+/* No light screen theme. The identity being adopted is the lab's dark
+   terminal look, which has no light variant, and a light-preferring visitor
+   gets the dark scheme — defensible for a site whose point is that aesthetic,
+   and it still clears contrast because the dark scheme does. The one place a
+   light rendering genuinely matters is paper, covered by the print block,
+   which sets its own light values explicitly rather than relying on a
+   prefers-color-scheme block. A light screen theme is additive later if wanted. */
 
 *,
 *::before,
@@ -70,8 +67,15 @@ body {
   text-wrap: pretty;
 }
 
+/* The content column. Grows with the viewport instead of floating in a narrow
+   54rem strip on a wide screen, but stops well short of edge-to-edge: a line
+   of prose past ~70ch is as hard to read as one too narrow, and the two-column
+   resume wants room without the rail and the timeline each sprawling.
+   Individual prose stays capped by --measure, so widening the column reclaims
+   whitespace and gives the split screen room rather than lengthening text
+   lines. 90vw keeps a margin on every size; the 75rem cap is the ceiling. */
 main {
-  max-width: 54rem;
+  inline-size: min(90vw, 75rem);
   margin-inline: auto;
 }
 
@@ -142,26 +146,68 @@ p {
   font-size: 0.875rem;
 }
 
+/* The full-width header band, stacked: the identity row (monogram, name,
+   tagline, location) spanning the content width, then the bio directly beneath
+   it. The band sits above the split, so both parts run the full width rather
+   than being confined to a column. */
+.resume-header {
+  margin-block-end: var(--space-5);
+}
+
+/* The identity cluster — portrait, name, tagline, contact — centered as a
+   group above the bio rather than left-aligned in the band. The portrait and
+   the text block sit in a centered row; the text itself centers under the
+   name. The bio below stays full-width. */
 .profile {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-4);
   align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+/* Keep the tagline on one line where the band has room. It is long, so it
+   only gets no-wrap at the split breakpoint; on a narrow screen it wraps
+   rather than overflowing. */
+@media (min-width: 60rem) {
+  .lede {
+    white-space: nowrap;
+  }
+}
+
+/* The bio under the identity row, spanning the full band width so the header
+   reaches the same right edge as the split below it rather than stopping
+   short and reading as left-weighted. It is a short, scannable intro, not
+   long-form prose, so the full-width line length is acceptable here where it
+   would not be for body copy. The `none` overrides the global `p` measure cap. */
+.profile-summary {
+  max-width: none;
+  margin-block-start: var(--space-4);
 }
 
 /* One element, one rule. The old site stacked three rotated rectangles per
    shape and hand-positioned fourteen instances by ID. */
 .hex {
   flex: none;
-  inline-size: 5.5rem;
+  inline-size: 6.5rem;
   aspect-ratio: 1.1547;
   clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
   background-color: var(--surface-raised);
-  display: grid;
-  place-items: center;
-  font-family: var(--font-mono);
-  font-size: 1.5rem;
-  color: var(--accent-warm);
+  /* Was a grid centring a monogram; now it frames the portrait, which fills
+     the hex. The display and overflow keep the image inside the clip. */
+  display: block;
+  overflow: hidden;
+}
+
+/* The portrait fills the hex and is cropped to it by object-fit. The hex's
+   clip-path does the hexagonal masking; object-fit: cover stops the photo's
+   own aspect ratio from letterboxing inside the shape. */
+.hex__portrait {
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .timeline {
@@ -195,8 +241,100 @@ p {
   max-width: var(--measure);
 }
 
+/* Each skill group is a surface card so the lists read as grouped blocks
+   rather than text orphaned on the near-black page. A right magenta bar
+   mirrors the cyan left bar on the experience cards: the structure accent for
+   a structural grouping, on the opposite edge, so the two column kinds read as
+   a matched pair rather than a copy. */
 .skill-group {
-  margin-block-end: var(--space-4);
+  background-color: var(--surface);
+  border-inline-end: 2px solid var(--accent-warm);
+  border-radius: var(--radius);
+  padding: var(--space-3);
+  margin-block-end: var(--space-3);
+}
+
+.skill-group h3 {
+  margin-block-start: 0;
+}
+
+.skill-group ul {
+  margin-block: var(--space-2) 0;
+  padding-inline-start: var(--space-3);
+  color: var(--text-muted);
+}
+
+.skill-group li {
+  margin-block-end: var(--space-1);
+}
+
+/* The split screen. One column by default so the page is a coherent, ordered
+   document with no CSS and on a narrow screen; two columns above 60rem, the
+   same breakpoint the lab's landing uses. Source order is the single-column
+   reading order: experience, then the rail's certifications, projects,
+   buttons, skills. minmax(0, …) so a long preformatted line in experience
+   cannot blow a track out; align-items: start so the rail does not stretch to
+   the experience column's height. */
+.resume-body {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-5);
+}
+
+@media (min-width: 60rem) {
+  .resume-body {
+    grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}
+
+/* The right rail. Tighter vertical rhythm than the main column so skills rises
+   toward the fold beneath the short certifications and project lists. */
+
+/* The first heading in either column loses the large top margin an h2 carries
+   in the main flow, so both columns start their first heading at the same top
+   edge — Experience aligns with Certifications rather than sitting 4rem lower. */
+.column > :first-child h2 {
+  margin-block-start: 0;
+}
+
+/* Project links and the action buttons, as a stack of full-width button-links
+   so "buttons to projects" reads as intended. A project with no destination
+   is a plain item, not a dead link. */
+.rail-links {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.rail-links .button-link {
+  display: block;
+}
+
+.rail-links .meta {
+  margin-block: var(--space-1) 0;
+}
+
+/* A project with no url/repo: shown, not linked. */
+.rail-links__plain {
+  background-color: var(--surface);
+  border-inline-start: 2px solid var(--text-muted);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+/* The two actions sit together above skills. */
+.rail-actions {
+  display: grid;
+  gap: var(--space-2);
+  margin-block: var(--space-4);
+}
+
+.rail-actions .button-link {
+  display: block;
+  text-align: center;
 }
 
 /* Architecture diagram on /stack.
@@ -469,7 +607,7 @@ p {
 }
 
 footer {
-  max-width: 54rem;
+  inline-size: min(90vw, 75rem);
   margin: var(--space-6) auto 0;
   padding-block-start: var(--space-3);
   border-block-start: 1px solid var(--border);
