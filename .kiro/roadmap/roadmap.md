@@ -20,9 +20,16 @@ decisions so they do not drift into two places.
 | [6](phase6/) | Interactive: provenance check + fit analysis | Built, pending deploy verification |
 | [7](phase7/) | Admin, hardening, operations | Outlined |
 | [8](phase8/) | Polish | Outlined, deliberately thin |
+| [9](phase9/) | Resume reskin and split-screen layout | Specced |
 
 Phases 7 and 8 are outlines on purpose. Designing them before the system exists
 produces documents that get rewritten.
+
+Phase 9 is a rendering-layer reskin: the resume adopts the GenAI lab's dark
+terminal palette and a two-column layout (experience left; a right rail of
+certifications, project links, a compare-and-lab button pair, and skills). It
+touches only `resume-core`'s templates and CSS — no content, payload, or infra
+change — so it can land any time independent of the pipeline work.
 
 ## Sequencing
 

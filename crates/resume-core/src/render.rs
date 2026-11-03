@@ -198,24 +198,6 @@ pub struct PageContext<'a> {
     pub provenance_enabled: bool,
 }
 
-/// Initials for the monogram, until there is a portrait to put there.
-///
-/// Preferred name plus surname, so "William \"Matt\" Rader" gives "MR" rather
-/// than the "WM" a naive first-two-words split would produce.
-fn monogram(preferred: &str, full_name: &str) -> String {
-    let first = preferred.chars().find(char::is_ascii_alphabetic);
-    let last = full_name
-        .split_whitespace()
-        .next_back()
-        .and_then(|word| word.chars().find(char::is_ascii_alphabetic));
-
-    [first, last]
-        .into_iter()
-        .flatten()
-        .collect::<String>()
-        .to_uppercase()
-}
-
 fn social_meta(resume: &Resume, ctx: PageContext<'_>) -> Markup {
     let profile = &resume.profile;
     let title = format!("{} — {}", profile.full_name, profile.headline);
@@ -302,39 +284,17 @@ pub fn page(resume: &Resume, ctx: PageContext<'_>) -> Markup {
     let title = format!("{} — {}", profile.full_name, profile.headline);
 
     let body = html! {
-        (profile_header(resume, ctx))
-        (experience(resume))
-        (skills(&resume.skills))
-        @if !resume.projects.is_empty() {
-            (projects(&resume.projects))
-        }
-        @if !resume.certifications.is_empty() {
-            section {
-                h2 { "Certifications" }
-                ul {
-                    @for cert in &resume.certifications {
-                        li { (cert.name) }
-                    }
-                }
+        // The header spans the full content width across the top: portrait,
+        // name, tagline, and bio. Below it the split begins — experience left,
+        // the rail (certifications first) right — so certifications sits under
+        // the header rather than beside it. One column below 60rem; the fit
+        // dialog is a modal, out of the flow.
+        (profile_header(resume))
+        div class="resume-body" {
+            div class="column column--main" {
+                (experience(resume))
             }
-        }
-        section {
-            h2 { "Hiring?" }
-            p {
-                "Paste a job description and see which parts of this experience "
-                "map to it, where the gaps are, and what is worth leading with."
-            }
-            // A real link, upgraded to a modal only where that works.
-            p { a id="fit-trigger" href="/fit" class="button-link" { "Check a job description" } }
-            @if ctx.provenance_enabled {
-                p {
-                    "This page can also check itself: links, repositories, and "
-                    "published artifacts verified live against their sources."
-                }
-                form method="post" action="/provenance" {
-                    button type="submit" { "Run a provenance check" }
-                }
-            }
+            (right_rail(resume))
         }
         (fit_dialog())
     };
@@ -352,27 +312,48 @@ pub fn page(resume: &Resume, ctx: PageContext<'_>) -> Markup {
     )
 }
 
-fn profile_header(resume: &Resume, ctx: PageContext<'_>) -> Markup {
+fn profile_header(resume: &Resume) -> Markup {
     let profile = &resume.profile;
 
     html! {
-        header class="profile" {
-            // Decorative until a portrait exists. Hidden from assistive
-            // technology because the name is already in the heading.
-            div class="hex" aria-hidden="true" {
-                (monogram(&profile.preferred_name, &profile.full_name))
-            }
-            div {
-                h1 { (profile.full_name) }
-                p class="lede" { (profile.headline) }
-                p class="meta" {
-                    (profile.location)
-                    " · "
-                    (resume.experience_years(ctx.as_of)) " years"
+        // The full-width header band. Identity (monogram, name, tagline,
+        // location) on the left; the bio beside it on the right, so the band
+        // fills the content width with two readable blocks rather than a
+        // left-weighted header with an empty right. Stacks on a narrow screen.
+        header class="resume-header" {
+            div class="profile" {
+                // The portrait, hex-clipped so the motif and the photo are one
+                // decision rather than two. WebP primary with a PNG fallback;
+                // a modern browser fetches only the few-KB WebP. Explicit
+                // width/height reserve the box so the layout does not shift as
+                // it loads. Real alt naming the person, not "photo"; the hex
+                // clip is CSS on the img, so no decorative wrapper is needed.
+                picture class="hex" {
+                    source srcset=(crate::assets::PORTRAIT_WEBP.url()) type="image/webp";
+                    img
+                        class="hex__portrait"
+                        src=(crate::assets::PORTRAIT_PNG.url())
+                        width=(crate::assets::PORTRAIT_WIDTH)
+                        height=(crate::assets::PORTRAIT_HEIGHT)
+                        alt=(format!("{}, portrait", profile.full_name));
+                }
+                div {
+                    h1 { (profile.full_name) }
+                    p class="lede" { (profile.headline) }
+                    // Location and contact email. Tenure is not repeated here:
+                    // the bio states it in prose with context, so a derived
+                    // "N years" beside the city would duplicate that claim and
+                    // (computed from employed months, excluding the career
+                    // break) disagree with it. One claim, one source.
+                    p class="meta" {
+                        (profile.location)
+                        " · "
+                        a href=(format!("mailto:{}", profile.email)) { (profile.email) }
+                    }
                 }
             }
+            p class="profile-summary" { (profile.summary) }
         }
-        p { (profile.summary) }
     }
 }
 
@@ -446,20 +427,58 @@ fn skills(groups: &[SkillGroup]) -> Markup {
     }
 }
 
-fn projects(projects: &[Project]) -> Markup {
+/// The right rail, top to bottom: certifications, project links, the two
+/// action buttons, then skills. The order is deliberate — certifications and
+/// project links are short, so skills rises toward the fold beneath them.
+/// Source order is the single-column reading order on a narrow screen.
+fn right_rail(resume: &Resume) -> Markup {
     html! {
-        section {
-            h2 { "Projects" }
+        div class="column rail" {
+            @if !resume.certifications.is_empty() {
+                section {
+                    h2 { "Certifications" }
+                    ul {
+                        @for cert in &resume.certifications {
+                            li { (cert.name) }
+                        }
+                    }
+                }
+            }
+            @if !resume.projects.is_empty() {
+                section {
+                    h2 { "Projects" }
+                    (project_links(&resume.projects))
+                }
+            }
+            // The two actions, above skills. The compare button keeps the
+            // id and href the fit modal upgrade binds to, so that wiring is
+            // untouched; the lab button is a plain navigation link.
+            nav class="rail-actions" aria-label="Explore" {
+                a id="fit-trigger" href="/fit" class="button-link" {
+                    "Compare a job description"
+                }
+                a href="/gen-ai" class="button-link" { "Explore the GenAI lab" }
+            }
+            (skills(&resume.skills))
+        }
+    }
+}
+
+/// Projects as links, not inline write-ups. A project links to its `url`, or
+/// its `repo` if it has no url, and renders as a plain non-link item if it has
+/// neither — a dead link is worse than an honest unlinked entry. Turning these
+/// into internal project pages is a later phase.
+fn project_links(projects: &[Project]) -> Markup {
+    html! {
+        ul class="rail-links" {
             @for project in projects {
-                div class="entry" {
-                    h3 { (project.name) }
-                    p class="meta" { (project.status) }
-                    p { (project.summary) }
-                    @if !project.highlights.is_empty() {
-                        ul {
-                            @for highlight in &project.highlights {
-                                li { (highlight) }
-                            }
+                li {
+                    @if let Some(href) = project.url.as_deref().or(project.repo.as_deref()) {
+                        a href=(href) class="button-link" { (project.name) }
+                    } @else {
+                        div class="rail-links__plain" {
+                            (project.name)
+                            p class="meta" { (project.summary) }
                         }
                     }
                 }
@@ -1751,9 +1770,21 @@ mod tests {
     }
 
     #[test]
-    fn decoration_is_hidden_from_assistive_technology() {
+    fn the_portrait_is_content_not_decoration() {
         let html = rendered();
-        assert!(html.contains("aria-hidden=\"true\""));
+        // The hex now frames the portrait, which is the person, so it carries
+        // meaningful alt and is not hidden from assistive technology. (The old
+        // monogram placeholder was decorative and aria-hidden; the real photo
+        // is not.)
+        assert!(
+            html.contains("alt=") && html.contains(", portrait"),
+            "the portrait must carry descriptive alt text naming the person"
+        );
+        // The portrait image is served and referenced.
+        assert!(
+            html.contains(".webp") && html.contains("portrait"),
+            "the portrait sources must be present"
+        );
         // The bracket motif is CSS generated content, never markup.
         assert!(!html.contains("&lt; Experience &gt;"));
     }
@@ -1763,12 +1794,6 @@ mod tests {
         let html = rendered();
         assert_eq!(html.matches("<h1>").count(), 1, "exactly one h1");
         assert!(html.matches("<h2>").count() >= 3);
-    }
-
-    #[test]
-    fn monogram_uses_preferred_name_and_surname() {
-        assert_eq!(monogram("Matt", "William \"Matt\" Rader"), "MR");
-        assert_eq!(monogram("Ada", "Ada Lovelace"), "AL");
     }
 
     #[test]
@@ -1854,17 +1879,60 @@ mod tests {
     }
 
     #[test]
-    fn provenance_trigger_is_absent_when_unavailable() {
+    fn the_resume_page_never_offers_a_provenance_trigger() {
+        // The resume page dropped the provenance trigger in the phase 9 reskin.
+        // The feature and its route stay, but the resume no longer surfaces a
+        // button for it, regardless of whether the run store is available.
         let resume = load().unwrap();
-        let ctx = PageContext {
-            provenance_enabled: false,
-            ..CTX
-        };
-        let html = page(&resume, ctx).into_string();
-
-        assert!(!html.contains(r#"action="/provenance""#));
-        // The fit feature is unaffected, since it needs no run store.
+        for provenance_enabled in [true, false] {
+            let ctx = PageContext {
+                provenance_enabled,
+                ..CTX
+            };
+            let html = page(&resume, ctx).into_string();
+            assert!(
+                !html.contains(r#"action="/provenance""#),
+                "the resume page must not offer a provenance trigger (enabled={provenance_enabled})"
+            );
+        }
+        // The fit feature stays, as the compare-a-job-description action.
+        let html = page(&resume, CTX).into_string();
         assert!(html.contains(r#"href="/fit""#));
+    }
+
+    #[test]
+    fn the_resume_links_to_the_gen_ai_lab() {
+        // An unlinked lab may as well not exist — the same rationale as the
+        // /stack link test.
+        assert!(
+            rendered().contains(r#"href="/gen-ai""#),
+            "the resume must offer a way into the GenAI lab"
+        );
+    }
+
+    #[test]
+    fn the_right_rail_orders_certifications_then_projects_then_skills() {
+        // The rail's required top-to-bottom order, asserted on the byte
+        // positions of the section headings in source order (which is also the
+        // single-column reading order).
+        // Certifications before skills always; the projects section only
+        // appears when the document has projects, so its position is checked
+        // only when present.
+        let html = rendered();
+        let certs = html
+            .find(">Certifications<")
+            .expect("certifications heading");
+        let skills = html.find(">Skills<").expect("skills heading");
+        assert!(
+            certs < skills,
+            "rail order must put certifications above skills"
+        );
+        if let Some(projects) = html.find(">Projects<") {
+            assert!(
+                certs < projects && projects < skills,
+                "when present, projects sit between certifications and skills"
+            );
+        }
     }
 
     #[test]

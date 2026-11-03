@@ -322,6 +322,9 @@ fn router(state: AppState) -> Router {
         .route("/fit/fragment", axum::routing::post(analyse_fit_fragment))
         .route("/robots.txt", get(robots))
         .route("/sitemap.xml", get(sitemap))
+        // Content-hashed embedded assets (the portrait). The filename carries
+        // the hash, so the lookup is by full path and the cache is immutable.
+        .route("/assets/{file}", get(asset))
         .route("/healthz", get(healthz));
 
     // Registered only where the run store actually works. See
@@ -337,6 +340,27 @@ fn router(state: AppState) -> Router {
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+/// Serves an embedded, content-hashed binary asset (the portrait).
+///
+/// The URL carries an FNV hash of the bytes, so a match is served with a long
+/// immutable cache and a miss is a clean 404 rather than a stale serve. The
+/// bytes and the URL both come from `resume_core::assets`, so the renderer and
+/// this handler cannot disagree about a name.
+async fn asset(Path(file): Path<String>) -> Response {
+    let path = format!("/assets/{file}");
+    match resume_core::assets::by_url(&path) {
+        Some(asset) => (
+            [
+                (header::CONTENT_TYPE, asset.content_type),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+            ],
+            asset.bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn stack(headers: HeaderMap) -> Response {
