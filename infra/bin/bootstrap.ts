@@ -36,6 +36,8 @@ const oidc = new GithubOidcStack(app, 'rader-resume-github-oidc', {
   repo,
   environment,
   existingProviderArn: app.node.tryGetContext('existingOidcProviderArn'),
+  ownerId: app.node.tryGetContext('githubOwnerId'),
+  repoId: app.node.tryGetContext('githubRepoId'),
   env: targetEnv(app),
 });
 
