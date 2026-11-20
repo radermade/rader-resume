@@ -126,9 +126,14 @@
       "why": "In the Converse tool-use protocol the model returns a toolUse block — the tool name and the arguments it wants — and stops. Your code runs the tool against the order API and returns a toolResult on the next turn. The model never calls the API and never holds its credentials: it proposes a call, your code decides whether and how to make it. This is runnable: the Converse call returns a toolUse for get_order_status, and your code would run it and feed the result back. The losing shape is giving the model direct API access, which collapses the boundary the whole design depends on — especially for the refund tool.",
       "snippets": [
         {
+          "label": "The tool config: one tool, get_order_status, with a JSON schema for its input. The model can only propose calls to tools listed here.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nTOOL_CONFIG = {\n    \"tools\": [{\n        \"toolSpec\": {\n            \"name\": \"get_order_status\",\n            \"description\": \"Look up the status of a member's order.\",\n            \"inputSchema\": {\"json\": {\n                \"type\": \"object\",\n                \"properties\": {\"orderId\": {\"type\": \"string\"}},\n                \"required\": [\"orderId\"],\n            }},\n        }\n    }]\n}"
+        },
+        {
           "label": "Converse with the tool config. The model returns a toolUse block and stops; it does not call the API.",
           "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"where is order 4412\"}]}],\n    toolConfig=TOOL_CONFIG,\n)\nprint(out[\"stopReason\"])  # tool_use"
+          "source": "out = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"where is order 4412\"}]}],\n    toolConfig=TOOL_CONFIG,\n)\nprint(out[\"stopReason\"])  # tool_use"
         },
         {
           "label": "Read the toolUse the model asked for. Your code runs it against the order API; the model never saw the credentials.",
@@ -163,8 +168,18 @@
                 "message": {
                   "role": "assistant",
                   "content": [
-                    { "text": "Let me look up that order." },
-                    { "toolUse": { "toolUseId": "tu-1", "name": "get_order_status", "input": { "orderId": "4412" } } }
+                    {
+                      "text": "Let me look up that order."
+                    },
+                    {
+                      "toolUse": {
+                        "toolUseId": "tu-1",
+                        "name": "get_order_status",
+                        "input": {
+                          "orderId": "4412"
+                        }
+                      }
+                    }
                   ]
                 }
               },
@@ -176,7 +191,10 @@
             "operation": "ListFoundationModels",
             "body": {
               "modelSummaries": [
-                { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" }
+                {
+                  "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                  "providerName": "Anthropic"
+                }
               ]
             }
           }
@@ -195,9 +213,14 @@
           "source": "def validate_refund(args, session):\n    if args[\"orderId\"] not in session[\"member_orders\"]:\n        raise ValueError(\"order not owned by this member\")\n    if not (0 < args[\"amount\"] <= session[\"order_total\"][args[\"orderId\"]]):\n        raise ValueError(\"amount out of range\")\n    return True"
         },
         {
-          "label": "Look up the real order to validate against, through the AgentCore runtime. A fabricated id has no status and fails before the refund path.",
+          "label": "Look up the real order to validate against, through the AgentCore runtime. The response is a stream: read it and parse the JSON.",
           "language": "python",
-          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\nout = agent.invoke_agent_runtime(\n    agentRuntimeArn=\"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/member-services\",\n    runtimeSessionId=\"sess-4412\",\n    payload=json.dumps({\"tool\": \"get_order_status\", \"input\": {\"orderId\": \"4412\"}}),\n)\nprint(out[\"state\"], out[\"orderTotal\"])"
+          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\nout = agent.invoke_agent_runtime(\n    agentRuntimeArn=\"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/member-services\",\n    runtimeSessionId=\"sess-member-4412-order-lookup-0001\",\n    payload=json.dumps({\"tool\": \"get_order_status\", \"input\": {\"orderId\": \"4412\"}}),\n)\norder = json.loads(out[\"response\"].read())\nprint(order[\"state\"], order[\"orderTotal\"])"
+        },
+        {
+          "label": "Validate the model's arguments against the looked-up order. The real id passes; a fabricated id fails before the refund path.",
+          "language": "python",
+          "source": "session = {\"member_orders\": [\"4412\"], \"order_total\": {\"4412\": order[\"orderTotal\"]}}\nprint(validate_refund({\"orderId\": \"4412\", \"amount\": 20.0}, session))\ntry:\n    validate_refund({\"orderId\": \"9999\", \"amount\": 20.0}, session)\nexcept ValueError as e:\n    print(\"rejected:\", e)"
         },
         {
           "label": "From the terminal, list the gateway's targets so you confirm the order API is exposed before the validator calls it.",
@@ -233,7 +256,11 @@
             "operation": "ListGatewayTargets",
             "body": {
               "items": [
-                { "targetId": "tgt-orders", "name": "order-api", "status": "READY" }
+                {
+                  "targetId": "tgt-orders",
+                  "name": "order-api",
+                  "status": "READY"
+                }
               ]
             }
           }
@@ -609,12 +636,12 @@
         {
           "label": "The agent-core runtime client, pointed at the stuck session.",
           "language": "python",
-          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\n\nRUNTIME_ARN = \"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/member-services\"\nSESSION_ID = \"sess-4412-stuck\"  # the session waiting on a tool result"
+          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\n\nRUNTIME_ARN = \"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/member-services\"\nSESSION_ID = \"sess-member-4412-stuck-awaiting-result\"  # the session waiting on a tool result"
         },
         {
           "label": "Post the missing tool result to that session. The loop resumes where it stalled; no new agent, no lost context.",
           "language": "python",
-          "source": "out = agent.invoke_agent_runtime(\n    agentRuntimeArn=RUNTIME_ARN,\n    runtimeSessionId=SESSION_ID,\n    payload=json.dumps({\n        \"toolResult\": {\"toolUseId\": \"tu-7\", \"content\": [{\"json\": {\"state\": \"SHIPPED\"}}]}\n    }),\n)\nprint(out[\"statusCode\"])  # the session continues from the stall"
+          "source": "out = agent.invoke_agent_runtime(\n    agentRuntimeArn=RUNTIME_ARN,\n    runtimeSessionId=SESSION_ID,\n    payload=json.dumps({\n        \"toolResult\": {\"toolUseId\": \"tu-7\", \"content\": [{\"json\": {\"state\": \"SHIPPED\"}}]}\n    }),\n)\nprint(out[\"statusCode\"])  # the session continues from the stall\nprint(out[\"response\"].read().decode())"
         },
         {
           "label": "From the terminal, confirm the runtime is healthy before you blame the session — get-agent-runtime shows its status.",
@@ -641,8 +668,9 @@
             "operation": "InvokeAgentRuntime",
             "body": {
               "statusCode": 200,
-              "runtimeSessionId": "sess-4412-stuck",
-              "resumed": true
+              "runtimeSessionId": "sess-member-4412-stuck-awaiting-result",
+              "resumed": true,
+              "message": "toolResult tu-7 accepted; session continues"
             }
           },
           {

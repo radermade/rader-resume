@@ -83,12 +83,12 @@
         {
           "label": "The AgentCore runtime client, invoking the Strands specialist with a stable session id.",
           "language": "python",
-          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\n\nRUNTIME_ARN = \"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/clinical-strands\"\nSESSION_ID = \"sess-protocol-88\"  # stable per conversation, not per turn"
+          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\n\nRUNTIME_ARN = \"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/clinical-strands\"\nSESSION_ID = \"sess-protocol-88-clinician-4471-sepsis\"  # stable per conversation, not per turn (min 33 chars)"
         },
         {
           "label": "Invoke with the SAME session id each turn, so the Strands loop keeps the protocol it was in.",
           "language": "python",
-          "source": "out = agent.invoke_agent_runtime(\n    agentRuntimeArn=RUNTIME_ARN,\n    runtimeSessionId=SESSION_ID,\n    payload=json.dumps({\"text\": \"continue the sepsis protocol check\"}),\n)\nprint(out[\"statusCode\"])  # the loop resumes its session state"
+          "source": "out = agent.invoke_agent_runtime(\n    agentRuntimeArn=RUNTIME_ARN,\n    runtimeSessionId=SESSION_ID,\n    payload=json.dumps({\"text\": \"continue the sepsis protocol check\"}),\n)\nprint(out[\"statusCode\"])  # the loop resumes its session state\nprint(out[\"response\"].read().decode())"
         },
         {
           "label": "From the terminal, confirm the runtime is READY before invoking it — get-agent-runtime shows its status.",
@@ -114,9 +114,9 @@
             "service": "bedrock-agentcore",
             "operation": "InvokeAgentRuntime",
             "body": {
-              "statusCode": 200,
-              "runtimeSessionId": "sess-protocol-88",
-              "continued": true
+              "runtimeSessionId": "sess-protocol-88-clinician-4471-sepsis",
+              "continued": true,
+              "text": "Resuming the sepsis protocol check at the lactate step."
             }
           },
           {

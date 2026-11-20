@@ -317,57 +317,71 @@
     {
       "kind": "call",
       "title": "The code interpreter computes the premium",
-      "decision": "Whether the model computes a premium in its head, or the code interpreter calculates it.",
-      "why": "A premium is arithmetic — rates, dependents, proration — and a language model doing arithmetic in its head is a model guessing a benefits number. The code interpreter runs real Python the model writes, so the calculation is executed, not predicted, and the number is reproducible and auditable. The model decides what to compute; the interpreter computes it. This is runnable: invoking the agent with the code interpreter enabled returns a computed premium. The losing choice is letting the model state a premium directly, which is a plausible-looking number with no calculation behind it — wrong often enough to matter, and confidently so.",
+      "decision": "Whether the model computes a premium in its head, or the agent has the code interpreter to calculate it.",
+      "why": "A premium is arithmetic: rates, dependents, proration. A language model doing arithmetic in its head is guessing a benefits number. The code interpreter is a built-in action group (parentActionSignature AMAZON.CodeInterpreter) that lets the agent write and run real Python, so the calculation is executed, not predicted, and the result is reproducible and auditable. The model decides what to compute; the interpreter computes it. This is runnable: you list the agent's action groups, read the one that carries the interpreter signature, and check it is ENABLED on the draft version. The losing choice is an agent with no interpreter, where the model states a premium directly: a plausible-looking number with no calculation behind it, wrong often enough to matter and confidently so. (The InvokeAgent answer is a binary event stream, which this lab's sandbox cannot replay, so the lab verifies the configuration that makes the math executed instead.)",
       "snippets": [
         {
-          "label": "The agent-runtime client, invoking the agent with the code interpreter available for the premium math.",
+          "label": "The agent control-plane client, pointed at the benefits agent's working draft.",
           "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\n\nAGENT_ID = \"BENEFITSAG01\"\nALIAS_ID = \"PRODALIAS01\""
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent\", region_name=\"eu-central-1\")\n\nAGENT_ID = \"BENEFITSAG01\"\nVERSION = \"DRAFT\""
         },
         {
-          "label": "Invoke the agent for a premium question. The code interpreter runs the arithmetic; the model does not do it in its head.",
+          "label": "List the agent's action groups, then read each one. The group whose parentActionSignature is AMAZON.CodeInterpreter is what lets the agent run premium arithmetic as real Python.",
           "language": "python",
-          "source": "out = runtime.invoke_agent(\n    agentId=AGENT_ID,\n    agentAliasId=ALIAS_ID,\n    sessionId=\"sess-emp-77\",\n    inputText=\"What is my monthly premium with two dependents on plan Gold?\",\n    enableTrace=False,\n)\nfor event in out[\"completion\"]:\n    if \"chunk\" in event:\n        print(event[\"chunk\"][\"bytes\"].decode())"
+          "source": "groups = agent.list_agent_action_groups(agentId=AGENT_ID, agentVersion=VERSION)\nfor summary in groups[\"actionGroupSummaries\"]:\n    group = agent.get_agent_action_group(\n        agentId=AGENT_ID,\n        agentVersion=VERSION,\n        actionGroupId=summary[\"actionGroupId\"],\n    )[\"agentActionGroup\"]\n    print(group[\"actionGroupName\"], group.get(\"parentActionSignature\"), group[\"actionGroupState\"])"
         },
         {
-          "label": "From the terminal, confirm the alias is the production one before invoking it — get-agent-alias shows which version it routes to.",
+          "label": "From the terminal, list the action groups on the draft: the code interpreter group must be there and ENABLED.",
           "language": "shell",
-          "source": "aws bedrock-agent get-agent-alias --agent-id BENEFITSAG01 --agent-alias-id PRODALIAS01"
+          "source": "aws bedrock-agent list-agent-action-groups --agent-id BENEFITSAG01 --agent-version DRAFT"
         }
       ],
-      "infrastructure": "// The code interpreter runs the premium arithmetic as real Python the model writes, so the number is executed and auditable, not predicted. The model decides what to compute; the interpreter computes it. A model stating a premium directly is a confident guess at a benefits figure.",
+      "infrastructure": "// The code interpreter is a built-in action group (parentActionSignature AMAZON.CodeInterpreter) that runs the premium arithmetic as real Python the model writes, so the number is executed and auditable, not predicted. The model decides what to compute; the interpreter computes it. An agent without it states a premium directly, which is a confident guess at a benefits figure.",
       "workbench": {
         "open": "answer.py",
         "files": [
           {
             "path": "answer.py",
-            "body": "# Assemble the agent invocation from the snippets on the left, then Run. The\n# intercept streams back a computed premium.\n#\n# The goal: the premium comes from the code interpreter running arithmetic,\n# not from the model guessing a number.\n"
+            "body": "# Assemble the action-group check from the snippets on the left, then Run.\n# The intercept returns the agent's action groups.\n#\n# The goal: confirm the premium comes from the code interpreter running\n# arithmetic, not from the model guessing a number.\n"
           },
           {
             "path": "NOTES.md",
-            "body": "The code interpreter is the answer to 'the model must not do math in its\nhead.' It writes and runs Python in a sandbox, so a premium is a computed\nresult with a visible calculation, not a token-predicted figure. The\ninvoke_agent completion is a stream of events; the chunk events carry the\nanswer text. enableTrace is False here for the same reason as the\nmember-services trace step: the trace holds the employee's details.\n"
+            "body": "The code interpreter is the answer to 'the model must not do math in its\nhead.' It writes and runs Python in a sandbox, so a premium is a computed\nresult with a visible calculation, not a token-predicted figure. It is\nattached as an action group with parentActionSignature\nAMAZON.CodeInterpreter and no executor of your own. invoke_agent returns an\nevent stream, which the lab's sandbox cannot replay, so this step verifies\nthe configuration instead. When you invoke for real, keep enableTrace off\nunless you need it: the trace holds the employee's details.\n"
           }
         ],
         "responses": [
           {
-            "service": "bedrock-agent-runtime",
-            "operation": "InvokeAgent",
+            "service": "bedrock-agent",
+            "operation": "ListAgentActionGroups",
             "body": {
-              "completion": "stream:computed-premium",
-              "contentType": "application/json",
-              "sessionId": "sess-emp-77"
+              "actionGroupSummaries": [
+                {
+                  "actionGroupId": "AGCODEINT01",
+                  "actionGroupName": "CodeInterpreterAction",
+                  "actionGroupState": "ENABLED",
+                  "updatedAt": "2025-03-04T09:12:00Z"
+                },
+                {
+                  "actionGroupId": "AGBENEFIT01",
+                  "actionGroupName": "BenefitsLookup",
+                  "actionGroupState": "ENABLED",
+                  "updatedAt": "2025-03-04T09:10:00Z"
+                }
+              ]
             }
           },
           {
             "service": "bedrock-agent",
-            "operation": "GetAgentAlias",
+            "operation": "GetAgentActionGroup",
             "body": {
-              "agentAlias": {
+              "agentActionGroup": {
                 "agentId": "BENEFITSAG01",
-                "agentAliasId": "PRODALIAS01",
-                "agentAliasName": "prod",
-                "routingConfiguration": [ { "agentVersion": "4" } ]
+                "agentVersion": "DRAFT",
+                "actionGroupId": "AGCODEINT01",
+                "actionGroupName": "CodeInterpreterAction",
+                "actionGroupState": "ENABLED",
+                "parentActionSignature": "AMAZON.CodeInterpreter",
+                "updatedAt": "2025-03-04T09:12:00Z"
               }
             }
           }

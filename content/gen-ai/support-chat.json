@@ -16,15 +16,55 @@
       "title": "The system",
       "diagram": {
         "groups": [
-          { "id": "acct", "label": "AWS Account" }
+          {
+            "id": "acct",
+            "label": "AWS Account"
+          }
         ],
         "nodes": [
-          { "id": "caller", "label": "Caller (watching stream)", "flowsTo": ["gateway"] },
-          { "id": "gateway", "label": "API Gateway (streaming)", "icon": "api-gateway", "group": "acct", "flowsTo": ["lambda"] },
-          { "id": "lambda", "label": "AWS Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["bedrock", "cache", "session"] },
-          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" },
-          { "id": "cache", "label": "ElastiCache / semantic cache", "group": "acct" },
-          { "id": "session", "label": "DynamoDB session", "group": "acct" }
+          {
+            "id": "caller",
+            "label": "Caller (watching stream)",
+            "flowsTo": [
+              "gateway"
+            ]
+          },
+          {
+            "id": "gateway",
+            "label": "API Gateway (streaming)",
+            "icon": "api-gateway",
+            "group": "acct",
+            "flowsTo": [
+              "lambda"
+            ]
+          },
+          {
+            "id": "lambda",
+            "label": "AWS Lambda",
+            "icon": "lambda",
+            "group": "acct",
+            "flowsTo": [
+              "bedrock",
+              "cache",
+              "session"
+            ]
+          },
+          {
+            "id": "bedrock",
+            "label": "Amazon Bedrock",
+            "icon": "bedrock",
+            "group": "acct"
+          },
+          {
+            "id": "cache",
+            "label": "ElastiCache / semantic cache",
+            "group": "acct"
+          },
+          {
+            "id": "session",
+            "label": "DynamoDB session",
+            "group": "acct"
+          }
         ]
       }
     },
@@ -32,47 +72,53 @@
       "kind": "call",
       "title": "Stream through API Gateway",
       "decision": "Whether the answer is buffered in the Lambda and returned whole, or streamed token-by-token to the caller.",
-      "why": "The caller is watching the reply appear. A buffered Lambda holds the entire answer until it is complete and then returns it, so the page stays blank for the whole generation — four seconds of nothing, the bug they file even when the answer is right. Streaming sends tokens as the model produces them, through a streaming-capable path, so the first token reaches the caller almost immediately. This is runnable: ConverseStream returns an event stream the handler forwards. The losing choice is the buffered invoke that waits for the full completion before the caller sees anything.",
+      "why": "The caller is watching the reply appear. A buffered Lambda holds the entire answer until it is complete and then returns it, so the page stays blank for the whole generation — four seconds of nothing, the bug they file even when the answer is right. Streaming sends tokens as the model produces them, through a streaming-capable path, so the first token reaches the caller almost immediately. This is a configuration step: ConverseStream returns a binary event stream the sandbox cannot fake, so you assemble the streaming handler and the API Gateway integration that forwards it. The losing choice is the buffered Converse that waits for the full completion before the caller sees anything.",
       "snippets": [
         {
-          "label": "ConverseStream, so tokens are forwarded as they are produced instead of buffered whole.",
-          "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nresp = runtime.converse_stream(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"what are your hours\"}]}],\n)"
+          "label": "A streaming handler: ConverseStreamCommand, with each text delta written to the response stream as it arrives.",
+          "language": "typescript",
+          "source": "export const handler = awslambda.streamifyResponse(async (event, responseStream) => {\n  const out = await bedrock.send(new ConverseStreamCommand({ modelId, messages, inferenceConfig: { maxTokens: 512 } }));\n  for await (const chunk of out.stream!) {\n    const text = chunk.contentBlockDelta?.delta?.text;\n    if (text) responseStream.write(text); // the caller sees this now, not at the end\n  }\n  responseStream.end();\n});"
         },
         {
-          "label": "Forward each chunk as it arrives. The caller sees the first token right away, not after the whole answer.",
-          "language": "python",
-          "source": "for event in resp[\"stream\"]:\n    if \"contentBlockDelta\" in event:\n        print(event[\"contentBlockDelta\"][\"delta\"][\"text\"], end=\"\")"
-        },
-        {
-          "label": "From the terminal, confirm the streaming model is available before wiring the stream — list the text models in the Region.",
-          "language": "shell",
-          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+          "label": "API Gateway streams the Lambda response through instead of buffering it whole.",
+          "language": "typescript",
+          "source": "const integration = new apigateway.LambdaIntegration(answerFn, {\n  responseTransferMode: apigateway.ResponseTransferMode.STREAM,\n});"
         }
       ],
-      "infrastructure": "// ConverseStream yields tokens as the model produces them; the handler forwards each chunk over a streaming response. A buffered Lambda holds the whole answer and returns it at the end, so the page is blank for the full generation — the four-second blank the caller files as a bug. Streaming is the fix for perceived latency.",
+      "infrastructure": "// ConverseStream yields tokens as the model produces them; the handler forwards each chunk over a streaming response and API Gateway passes the stream through. A buffered Lambda holds the whole answer and returns it at the end, so the page is blank for the full generation — the four-second blank the caller files as a bug. Streaming is the fix for perceived latency.",
       "workbench": {
-        "open": "answer.py",
+        "open": "stack.ts",
         "files": [
           {
-            "path": "answer.py",
-            "body": "# Assemble the streaming call from the snippets on the left, then Run. The\n# intercept returns a stream of content deltas.\n#\n# The goal: tokens are forwarded as produced, so the caller sees the reply\n# begin immediately instead of a blank page.\n"
+            "path": "stack.ts",
+            "body": "// Assemble the streaming handler and the API Gateway integration from the\n// snippets on the left. Configuration step: nothing to Run.\n//\n// The goal: tokens are forwarded as produced, so the caller sees the reply\n// begin immediately instead of a blank page.\n"
           },
           {
             "path": "NOTES.md",
-            "body": "converse_stream is the streaming sibling of converse: same inputs, but the\nresponse is an event stream of contentBlockDelta events. The handler\nforwards them over a streaming response. The lesson is perceived latency:\nthe final answer may be identical, but a buffered response feels broken\nbecause the caller stares at nothing while it generates.\n"
+            "body": "ConverseStream is the streaming sibling of Converse: same inputs, but the\nresponse is an event stream of contentBlockDelta events. The handler\nforwards them over a Lambda response stream, and API Gateway is set to\nstream rather than buffer. The sandbox cannot fake a binary event stream,\nso this is graded as configuration. The lesson is perceived latency: the\nfinal answer may be identical, but a buffered response feels broken because\nthe caller stares at nothing while it generates.\n"
           }
         ],
-        "responses": [
+        "responses": [],
+        "checks": [
           {
-            "service": "bedrock-runtime",
-            "operation": "ConverseStream",
-            "body": { "stream": "deltas:what-are-your-hours" }
+            "pattern": "ConverseStreamCommand",
+            "present": true,
+            "message": "The handler calls the streaming API, so tokens are available as the model produces them."
           },
           {
-            "service": "bedrock",
-            "operation": "ListFoundationModels",
-            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+            "pattern": "streamifyResponse",
+            "present": true,
+            "message": "The handler writes each chunk to a Lambda response stream instead of returning one buffered body."
+          },
+          {
+            "pattern": "ResponseTransferMode.STREAM",
+            "present": true,
+            "message": "API Gateway passes the stream through, so the first token reaches the caller without waiting for the whole answer."
+          },
+          {
+            "pattern": "new ConverseCommand",
+            "present": false,
+            "message": "A buffered Converse holds the whole answer until it is complete, leaving the caller on a blank page for the full generation."
           }
         ]
       }
@@ -86,12 +132,12 @@
         {
           "label": "The stable prefix (system + tools) before the cache point; the account data and chunks after it.",
           "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nsystem = [\n    {\"text\": STABLE_SYSTEM_PROMPT},\n    {\"cachePoint\": {\"type\": \"default\"}},  # everything before this is cached\n]"
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nSTABLE_SYSTEM_PROMPT = \"You are the support assistant. Answer from the provided account context only.\"\n\nsystem = [\n    {\"text\": STABLE_SYSTEM_PROMPT},\n    {\"cachePoint\": {\"type\": \"default\"}},  # everything before this is cached\n]"
         },
         {
           "label": "The per-turn account data and chunks go in the messages, after the cache point. The account number is not in the prefix.",
           "language": "python",
-          "source": "out = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    system=system,\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": f\"{account_context}\\n{question}\"}]}],\n)\nprint(out[\"usage\"][\"cacheReadInputTokens\"])"
+          "source": "account_context = \"Account: 000123 (changes every turn)\"\nquestion = \"what are your hours\"\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    system=system,\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": f\"{account_context}\\n{question}\"}]}],\n)\nprint(out[\"output\"][\"message\"][\"content\"][0][\"text\"])\nprint(\"cache write:\", out[\"usage\"][\"cacheWriteInputTokens\"], \"read:\", out[\"usage\"][\"cacheReadInputTokens\"])"
         },
         {
           "label": "From the terminal, list the models to confirm the one you cache against supports prompt caching in the Region.",
@@ -117,15 +163,36 @@
             "service": "bedrock-runtime",
             "operation": "Converse",
             "body": {
-              "output": { "message": { "role": "assistant", "content": [ { "text": "We are open 9 to 5, Monday to Friday." } ] } },
+              "output": {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "text": "We are open 9 to 5, Monday to Friday."
+                    }
+                  ]
+                }
+              },
               "stopReason": "end_turn",
-              "usage": { "inputTokens": 820, "outputTokens": 14, "cacheWriteInputTokens": 800, "cacheReadInputTokens": 0 }
+              "usage": {
+                "inputTokens": 820,
+                "outputTokens": 14,
+                "cacheWriteInputTokens": 800,
+                "cacheReadInputTokens": 0
+              }
             }
           },
           {
             "service": "bedrock",
             "operation": "ListFoundationModels",
-            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+            "body": {
+              "modelSummaries": [
+                {
+                  "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                  "providerName": "Anthropic"
+                }
+              ]
+            }
           }
         ]
       }
@@ -274,7 +341,7 @@
         {
           "label": "maxTokens set on the call, bounding the reservation and the bill — not just the output length.",
           "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"explain my dispute options\"}]}],\n    inferenceConfig={\"maxTokens\": 512},\n)\nprint(out[\"usage\"][\"outputTokens\"])"
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"explain my dispute options\"}]}],\n    inferenceConfig={\"maxTokens\": 512},\n)\nprint(out[\"output\"][\"message\"][\"content\"][0][\"text\"])\nprint(out[\"stopReason\"], out[\"usage\"][\"outputTokens\"])"
         },
         {
           "label": "From the terminal, list the models to confirm the one you cap is callable in the Region.",
@@ -300,15 +367,35 @@
             "service": "bedrock-runtime",
             "operation": "Converse",
             "body": {
-              "output": { "message": { "role": "assistant", "content": [ { "text": "You can dispute a charge within 60 days by..." } ] } },
+              "output": {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "text": "You can dispute a charge within 60 days by..."
+                    }
+                  ]
+                }
+              },
               "stopReason": "max_tokens",
-              "usage": { "inputTokens": 120, "outputTokens": 512, "totalTokens": 632 }
+              "usage": {
+                "inputTokens": 120,
+                "outputTokens": 512,
+                "totalTokens": 632
+              }
             }
           },
           {
             "service": "bedrock",
             "operation": "ListFoundationModels",
-            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+            "body": {
+              "modelSummaries": [
+                {
+                  "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                  "providerName": "Anthropic"
+                }
+              ]
+            }
           }
         ]
       }
@@ -542,7 +629,7 @@
       "kind": "call",
       "title": "Adaptive retry, and AccessDenied is not retried",
       "decision": "How a spike's throttles are handled, and which errors are never retried.",
-      "why": "A spike that meets ThrottlingException and retries immediately turns into a retry storm — every throttled call retries at once, multiplying the load that caused the throttle. Adaptive retry with jitter backs off and spreads the retries, so the spike degrades instead of amplifying. And not every error is retryable: AccessDeniedException is a permission decision, and retrying a denied call does not turn a deny into an allow — it just wastes calls and hides the real problem. This is runnable: an AccessDenied from the intercept is surfaced, not retried. The losing choice is a blanket retry-everything with no backoff, which both storms on throttles and pointlessly retries denials.",
+      "why": "A spike that meets ThrottlingException and retries immediately turns into a retry storm — every throttled call retries at once, multiplying the load that caused the throttle. Adaptive retry with jitter backs off and spreads the retries, so the spike degrades instead of amplifying. And not every error is retryable: AccessDeniedException is a permission decision, and retrying a denied call does not turn a deny into an allow — it just wastes calls and hides the real problem. This is runnable: the client is built with adaptive retry and the call is wrapped so a denial is surfaced, not retried. The losing choice is a blanket retry-everything with no backoff, which both storms on throttles and pointlessly retries denials.",
       "snippets": [
         {
           "label": "Adaptive retry mode with jitter for throttles; the botocore config that spreads retries instead of storming.",
@@ -552,7 +639,7 @@
         {
           "label": "AccessDenied is not retried — it is a permission decision. Catch it and surface it rather than retrying into the wall.",
           "language": "python",
-          "source": "try:\n    out = runtime.converse(modelId=MODEL, messages=MESSAGES)\nexcept runtime.exceptions.AccessDeniedException:\n    # Retrying a denied call does not become an allow. Surface it.\n    raise"
+          "source": "MODEL = \"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\"\nMESSAGES = [{\"role\": \"user\", \"content\": [{\"text\": \"how do I reach support\"}]}]\n\ntry:\n    out = runtime.converse(modelId=MODEL, messages=MESSAGES)\n    print(out[\"output\"][\"message\"][\"content\"][0][\"text\"])\nexcept runtime.exceptions.AccessDeniedException:\n    # Retrying a denied call does not become an allow. Surface it.\n    raise"
         },
         {
           "label": "From the terminal, list the models to confirm the client and Region before debugging a throttle or a denial.",
@@ -578,14 +665,30 @@
             "service": "bedrock-runtime",
             "operation": "Converse",
             "body": {
-              "output": { "message": { "role": "assistant", "content": [ { "text": "Here is how to reach support." } ] } },
+              "output": {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    {
+                      "text": "Here is how to reach support."
+                    }
+                  ]
+                }
+              },
               "stopReason": "end_turn"
             }
           },
           {
             "service": "bedrock",
             "operation": "ListFoundationModels",
-            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+            "body": {
+              "modelSummaries": [
+                {
+                  "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                  "providerName": "Anthropic"
+                }
+              ]
+            }
           }
         ]
       }

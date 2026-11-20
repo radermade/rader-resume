@@ -25,7 +25,7 @@
           { "id": "bus", "label": "Product bus (EventBridge)", "group": "acct", "flowsTo": ["ingest"] },
           { "id": "ingest", "label": "Ingest Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["opensearch"] },
           { "id": "opensearch", "label": "OpenSearch (hybrid)", "group": "acct" },
-          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" }
+          { "id": "bedrock", "label": "Amazon Bedrock (knowledge base)", "icon": "bedrock", "group": "acct", "flowsTo": ["opensearch"] }
         ]
       }
     },
@@ -33,25 +33,25 @@
       "kind": "call",
       "title": "Hybrid search, because the id is a keyword",
       "decision": "Whether the box is a vector search, or a hybrid of keyword and vector, so a pasted product id and a vague sentence both work.",
-      "why": "A product id from a receipt is an exact token: it either matches or it does not, and a keyword (BM25) search nails it. A vague sentence shares no words with the title and needs a vector search. A vector-only store answers the sentence and fails the id — the id embeds to a point near nothing, and the highest-intent traffic on the site gets zero results. That is the Breaks when exactly. Hybrid runs both and fuses the scores, so the id hits on the keyword side and the sentence hits on the vector side. This is runnable: the hybrid query returns the jacket for the sentence and the exact sku for the id. The losing choice is vector-only, which quietly breaks the receipt lookup.",
+      "why": "A product id from a receipt is an exact token: it either matches or it does not, and a keyword (BM25) search nails it. A vague sentence shares no words with the title and needs a vector search. A vector-only store answers the sentence and fails the id — the id embeds to a point near nothing, and the highest-intent traffic on the site gets zero results. That is the Breaks when exactly. Hybrid runs both and fuses the scores (on Bedrock, overrideSearchType HYBRID on a knowledge base whose store is the existing OpenSearch cluster), so the id hits on the keyword side and the sentence hits on the vector side. This is runnable: the hybrid query returns the jacket for the sentence and the exact sku for the id. The losing choice is vector-only, which quietly breaks the receipt lookup.",
       "snippets": [
         {
-          "label": "The OpenSearch client. The cluster the retailer already runs, reached over its endpoint.",
+          "label": "The Retrieve client. A Bedrock knowledge base over the OpenSearch cluster the retailer already runs.",
           "language": "python",
-          "source": "import boto3\nfrom opensearchpy import OpenSearch\n\n# The embedding for the vector clause comes from Bedrock Titan.\nbedrock = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\nclient = OpenSearch(hosts=[{\"host\": \"catalog.example\", \"port\": 443}], use_ssl=True)\n\nQUERY = \"blue waterproof jacket under 120\""
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\n\nKB_ID = \"CATALOG123\"  # the knowledge base whose store is the existing OpenSearch domain\nQUERY = \"blue waterproof jacket under 120\""
         },
         {
-          "label": "A hybrid query: a keyword clause and a vector clause, fused. The id matches on the keyword side; the sentence matches on the vector side.",
+          "label": "Ask for a hybrid search: keyword and vector, fused. The id matches on the keyword side; the sentence matches on the vector side.",
           "language": "python",
-          "source": "body = {\n    \"query\": {\n        \"hybrid\": {\n            \"queries\": [\n                {\"match\": {\"title\": QUERY}},\n                {\"knn\": {\"embedding\": {\"vector\": embed(QUERY), \"k\": 10}}},\n            ]\n        }\n    }\n}\nhits = client.search(index=\"catalog\", body=body)\nfor h in hits[\"hits\"][\"hits\"]:\n    print(h[\"_source\"][\"sku\"], h[\"_source\"][\"title\"])"
+          "source": "res = agent.retrieve(\n    knowledgeBaseId=KB_ID,\n    retrievalQuery={\"text\": QUERY},\n    retrievalConfiguration={\n        \"vectorSearchConfiguration\": {\n            \"numberOfResults\": 10,\n            \"overrideSearchType\": \"HYBRID\",\n        }\n    },\n)\nfor hit in res[\"retrievalResults\"]:\n    print(hit[\"metadata\"][\"sku\"], hit[\"content\"][\"text\"])"
         },
         {
-          "label": "From the terminal, invoke the embedding model the vector clause depends on — invoke-model confirms Titan is reachable before you debug the query.",
+          "label": "From the terminal, confirm the knowledge base is ACTIVE and see its store — get-knowledge-base before you debug the query.",
           "language": "shell",
-          "source": "aws bedrock list-foundation-models --by-provider amazon"
+          "source": "aws bedrock-agent get-knowledge-base --knowledge-base-id CATALOG123"
         }
       ],
-      "infrastructure": "// Hybrid: a BM25 keyword clause and a kNN vector clause, score-fused. The\n// product id is an exact token the keyword side matches; the vague sentence\n// is a vector the kNN side matches. Vector-only answers the sentence and\n// drops the id to nothing — the receipt lookup, which is the highest-intent\n// traffic, silently breaks.",
+      "infrastructure": "// Hybrid via a knowledge base on the existing OpenSearch cluster: a BM25 keyword clause and a kNN vector clause, score-fused. The\n// product id is an exact token the keyword side matches; the vague sentence\n// is a vector the kNN side matches. Vector-only answers the sentence and\n// drops the id to nothing — the receipt lookup, which is the highest-intent\n// traffic, silently breaks.",
       "workbench": {
         "open": "answer.py",
         "files": [
@@ -61,28 +61,34 @@
           },
           {
             "path": "NOTES.md",
-            "body": "The hybrid query type fuses BM25 and kNN scores; OpenSearch needs a search\npipeline with a normalization processor for the fusion to be meaningful,\nwhich is infrastructure the search team already owns. The lesson is the\nshape: two clauses, two retrieval mechanisms, one result list. A vector-only\nstore (next step's refusal) cannot express the keyword clause at all, which\nis why it fails the id.\n"
+            "body": "With a knowledge base on OpenSearch, overrideSearchType HYBRID asks the\nstore to fuse BM25 and kNN scores; the normalization the fusion needs is\nconfigured by the service and the search team's cluster. The lesson is the\nshape: two clauses, two retrieval mechanisms, one result list. A vector-only\nstore (next step's refusal) cannot express the keyword clause at all, which\nis why it fails the id.\n"
           }
         ],
         "responses": [
           {
-            "service": "opensearch",
-            "operation": "Search",
+            "service": "bedrock-agent-runtime",
+            "operation": "Retrieve",
             "body": {
-              "hits": {
-                "hits": [
-                  { "_source": { "sku": "JKT-4412", "title": "Coastline Waterproof Shell Jacket" } }
-                ]
-              }
+              "retrievalResults": [
+                {
+                  "content": { "text": "Coastline Waterproof Shell Jacket" },
+                  "metadata": { "sku": "JKT-4412" },
+                  "score": 0.82
+                }
+              ]
             }
           },
           {
-            "service": "bedrock",
-            "operation": "ListFoundationModels",
+            "service": "bedrock-agent",
+            "operation": "GetKnowledgeBase",
             "body": {
-              "modelSummaries": [
-                { "modelId": "amazon.titan-embed-text-v2:0", "providerName": "Amazon", "modelName": "Titan Text Embeddings V2" }
-              ]
+              "knowledgeBase": {
+                "knowledgeBaseId": "CATALOG123",
+                "name": "catalog-search",
+                "status": "ACTIVE",
+                "knowledgeBaseConfiguration": { "type": "VECTOR" },
+                "updatedAt": "2026-11-02T06:20:00Z"
+              }
             }
           }
         ]
@@ -187,12 +193,12 @@
         {
           "label": "The candidates from the first-pass search, in the wrong order. The right jacket is third.",
           "language": "python",
-          "source": "import boto3\n\nbedrock = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nQUERY = \"blue waterproof jacket under 120\"\ncandidates = [\n    \"Navy rain poncho, one size\",\n    \"Blue windbreaker, not waterproof\",\n    \"Coastline Waterproof Shell Jacket, blue\",  # the right one, third\n]"
+          "source": "import boto3, json\n\nbedrock = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nQUERY = \"blue waterproof jacket under 120\"\ncandidates = [\n    \"Navy rain poncho, one size\",\n    \"Blue windbreaker, not waterproof\",\n    \"Coastline Waterproof Shell Jacket, blue\",  # the right one, third\n]"
         },
         {
           "label": "Rerank the candidates against the query. A cross-encoder scores query+doc together, so the jacket moves to first.",
           "language": "python",
-          "source": "out = bedrock.invoke_model(\n    modelId=\"cohere.rerank-v3-5:0\",\n    body=json.dumps({\"query\": QUERY, \"documents\": candidates, \"top_n\": 3}),\n)\nranked = json.loads(out[\"body\"].read())\nfor r in ranked[\"results\"]:\n    print(r[\"index\"], r[\"relevance_score\"], candidates[r[\"index\"]])"
+          "source": "out = bedrock.invoke_model(\n    modelId=\"cohere.rerank-v3-5:0\",\n    body=json.dumps({\"api_version\": 2, \"query\": QUERY, \"documents\": candidates, \"top_n\": 3}),\n)\nranked = json.loads(out[\"body\"].read())\nprint(\"rerank request\", ranked[\"id\"])\nfor r in ranked[\"results\"]:\n    print(r[\"index\"], r[\"relevance_score\"], candidates[r[\"index\"]])"
         },
         {
           "label": "From the terminal, confirm the rerank model is available in the Region before wiring it in — a model not enabled is an access error, not a bad call.",
@@ -218,6 +224,7 @@
             "service": "bedrock-runtime",
             "operation": "InvokeModel",
             "body": {
+              "id": "rerank-7c1e0f",
               "results": [
                 { "index": 2, "relevance_score": 0.91 },
                 { "index": 1, "relevance_score": 0.44 },
