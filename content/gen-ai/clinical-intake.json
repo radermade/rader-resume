@@ -174,7 +174,7 @@
         {
           "label": "ApplyGuardrail on the input as a standalone pre-check, before any model call.",
           "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.apply_guardrail(\n    guardrailIdentifier=\"GR12345678\",\n    guardrailVersion=\"3\",\n    source=\"INPUT\",\n    content=[{\"text\": {\"text\": note_with_identifier, \"qualifiers\": [\"guard_content\"]}}],\n)\nprint(out[\"action\"])  # GUARDRAIL_INTERVENED when the identifier is present"
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nnote_with_identifier = \"Intake note: patient SIN 046 454 286 reports fever for two days.\"\n\nout = runtime.apply_guardrail(\n    guardrailIdentifier=\"GR12345678\",\n    guardrailVersion=\"3\",\n    source=\"INPUT\",\n    content=[{\"text\": {\"text\": note_with_identifier, \"qualifiers\": [\"guard_content\"]}}],\n)\nprint(out[\"action\"], out[\"outputs\"][0][\"text\"])  # GUARDRAIL_INTERVENED when the identifier is present"
         },
         {
           "label": "From the terminal, confirm the guardrail and version exist before the pre-check depends on them — get-guardrail shows its status.",
@@ -222,7 +222,7 @@
         {
           "label": "The chat turn carries guardrailConfig, so the generated output is evaluated, not only the input.",
           "language": "python",
-          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": safe_input, \"guardContent\": {}}]}],\n    guardrailConfig={\"guardrailIdentifier\": \"GR12345678\", \"guardrailVersion\": \"3\"},\n)\nprint(out[\"stopReason\"])"
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nsafe_input = \"Intake note: patient {CA_SOCIAL_INSURANCE_NUMBER} reports fever for two days.\"\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"guardContent\": {\"text\": {\"text\": safe_input}}}]}],\n    guardrailConfig={\"guardrailIdentifier\": \"GR12345678\", \"guardrailVersion\": \"3\"},\n)\nprint(out[\"stopReason\"], out[\"output\"][\"message\"][\"content\"][0][\"text\"])"
         },
         {
           "label": "From the terminal, list the models to confirm the Converse model id is callable with the guardrail attached.",
@@ -455,7 +455,7 @@
         {
           "label": "Mask the detected entities in the input before the prompt, so the model receives placeholders, not raw values.",
           "language": "python",
-          "source": "def mask(text, entities):\n    # entities from Comprehend, sorted by BeginOffset descending so\n    # offsets stay valid as we replace.\n    for e in sorted(entities, key=lambda x: x[\"BeginOffset\"], reverse=True):\n        text = text[: e[\"BeginOffset\"]] + \"{\" + e[\"Type\"] + \"}\" + text[e[\"EndOffset\"] :]\n    return text\n\nmasked_prompt = mask(raw_note, detected_entities)"
+          "source": "def mask(text, entities):\n    # entities from Comprehend, sorted by BeginOffset descending so\n    # offsets stay valid as we replace.\n    for e in sorted(entities, key=lambda x: x[\"BeginOffset\"], reverse=True):\n        text = text[: e[\"BeginOffset\"]] + \"{\" + e[\"Type\"] + \"}\" + text[e[\"EndOffset\"] :]\n    return text\n\nraw_note = \"Intake: Jane Sample, jane@example.org, reports fever.\"\ndetected_entities = [\n    {\"Type\": \"NAME\", \"BeginOffset\": 8, \"EndOffset\": 19},\n    {\"Type\": \"EMAIL\", \"BeginOffset\": 21, \"EndOffset\": 37},\n]\n\nmasked_prompt = mask(raw_note, detected_entities)\nprint(masked_prompt)\n\nimport boto3\n\ncomprehend = boto3.client(\"comprehend\", region_name=\"eu-central-1\")\njobs = comprehend.list_pii_entities_detection_jobs()\nprint(jobs[\"PiiEntitiesDetectionJobPropertiesList\"][0][\"JobName\"])"
         },
         {
           "label": "From the terminal, confirm Comprehend is reachable for the detection the mask depends on — list its endpoints or a quick no-op.",

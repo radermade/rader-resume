@@ -170,17 +170,17 @@
       "why": "This is the step the whole product turns on. The SQL WHERE restricts to this client and to documents effective as of today, and the vector similarity runs only over those rows. A clause from another client, however semantically close, is never a candidate, because it was filtered out before the distance was computed. Running similarity first and filtering after is the cross-client quote waiting to happen: the other client's clause was retrieved, held, and one slip puts it in the markup. 'Close' is not a reason to quote another client's contract. This is runnable: the filtered query returns only Northwind's current clauses.",
       "snippets": [
         {
-          "label": "The connection, from the secret. psycopg over the Aurora cluster, credentials never inline.",
+          "label": "The connection, by secret ARN. The RDS Data API over the Aurora cluster, credentials never inline.",
           "language": "python",
-          "source": "import boto3, json, psycopg\n\nsm = boto3.client(\"secretsmanager\", region_name=\"eu-central-1\")\ncreds = json.loads(sm.get_secret_value(SecretId=\"contract-db\")[\"SecretString\"])\nconn = psycopg.connect(host=creds[\"host\"], user=creds[\"username\"], password=creds[\"password\"], dbname=\"matters\")\n\nCLIENT = \"northwind\"\nQUESTION = \"termination for convenience\""
+          "source": "import boto3\n\n# The RDS Data API runs SQL over HTTPS: no driver, no connection pool, no VPC path\n# from the caller. It authenticates with the secret's ARN, never an inline password.\nrds = boto3.client(\"rds-data\", region_name=\"eu-central-1\")\nCLUSTER_ARN = \"arn:aws:rds:eu-central-1:111122223333:cluster:contract-db\"\nSECRET_ARN = \"arn:aws:secretsmanager:eu-central-1:111122223333:secret:contract-db-AbCdEf\"\n\nCLIENT = \"northwind\"\nQUESTION = \"termination for convenience\"\n# Truncated stand-in; the real Lambda gets 1024 floats from Titan v2.\nquery_embedding = \"[0.021, -0.114, 0.067]\""
         },
         {
           "label": "The WHERE runs before the ORDER BY similarity. Another client's clause is not a candidate, not a re-ranked-away result.",
           "language": "python",
-          "source": "q = (\n    \"SELECT clause_id, text FROM clause \"\n    \"WHERE client = %s AND effective_date <= CURRENT_DATE \"\n    \"ORDER BY embedding <=> %s LIMIT 5\"\n)\nwith conn.cursor() as cur:\n    cur.execute(q, (CLIENT, query_embedding))\n    for clause_id, text in cur.fetchall():\n        print(clause_id, text)"
+          "source": "sql = (\n    \"SELECT clause_id, text FROM clause \"\n    \"WHERE client = :client AND effective_date <= CURRENT_DATE \"\n    \"ORDER BY embedding <=> CAST(:q AS vector) LIMIT 5\"\n)\nres = rds.execute_statement(\n    resourceArn=CLUSTER_ARN,\n    secretArn=SECRET_ARN,\n    database=\"matters\",\n    sql=sql,\n    parameters=[\n        {\"name\": \"client\", \"value\": {\"stringValue\": CLIENT}},\n        {\"name\": \"q\", \"value\": {\"stringValue\": query_embedding}},\n    ],\n)\nfor clause_id, text in res[\"records\"]:\n    print(clause_id[\"stringValue\"], text[\"stringValue\"])"
         },
         {
-          "label": "From the terminal, confirm the secret the query depends on resolves — describe-secret shows it exists and rotates, without printing the password.",
+          "label": "From the terminal, confirm the secret the Data API authenticates with resolves — describe-secret shows it exists and rotates, without printing the password.",
           "language": "shell",
           "source": "aws secretsmanager describe-secret --secret-id contract-db"
         }
@@ -191,19 +191,28 @@
         "files": [
           {
             "path": "answer.py",
-            "body": "# Assemble the filtered clause query from the snippets on the left, then\n# Run. The intercept resolves the secret and returns only Northwind's\n# current clauses.\n#\n# The goal: client and effective_date filter BEFORE similarity, so another\n# client's clause is never a candidate.\n"
+            "body": "# Assemble the filtered clause query from the snippets on the left, then\n# Run. The intercept answers the Data API call and returns only Northwind's\n# current clauses.\n#\n# The goal: client and effective_date filter BEFORE similarity, so another\n# client's clause is never a candidate.\n"
           },
           {
             "path": "NOTES.md",
-            "body": "The <=> operator is pgvector's cosine distance; ORDER BY embedding <=> q\nis the nearest-neighbour search. The load-bearing word is WHERE, and that\nit runs first: Postgres filters, then ranks the survivors. Compare the\nlosing shape — ORDER BY similarity LIMIT 50, then filter the 50 in Python —\nwhich pulls other clients' clauses into memory and trusts application code\nnot to leak them. effective_date <= CURRENT_DATE drops the 2022 agreement\nthat is still in the table but no longer governs.\n"
+            "body": "The <=> operator is pgvector's cosine distance; ORDER BY embedding <=> q\nis the nearest-neighbour search. The load-bearing word is WHERE, and that\nit runs first: Postgres filters, then ranks the survivors. Compare the\nlosing shape — ORDER BY similarity LIMIT 50, then filter the 50 in Python —\nwhich pulls other clients' clauses into memory and trusts application code\nnot to leak them. effective_date <= CURRENT_DATE drops the 2022 agreement\nthat is still in the table but no longer governs. The lab runs the SQL through\nthe RDS Data API (execute_statement) because it needs no driver; a Lambda in\nthe VPC could equally use a Postgres driver. The WHERE is the same either way.\n"
           }
         ],
         "responses": [
           {
-            "service": "secretsmanager",
-            "operation": "GetSecretValue",
+            "service": "rds-data",
+            "operation": "ExecuteStatement",
             "body": {
-              "SecretString": "{\"host\": \"contract-db.cluster-abc.eu-central-1.rds.amazonaws.com\", \"username\": \"desk\", \"password\": \"redacted-in-lab\", \"dbname\": \"matters\"}"
+              "records": [
+                [
+                  { "stringValue": "NW-MSA-14.2" },
+                  { "stringValue": "Either party may terminate for convenience on 60 days' written notice." }
+                ],
+                [
+                  { "stringValue": "NW-SOW-3.1" },
+                  { "stringValue": "Termination for convenience does not apply during the Phase 2 delivery window." }
+                ]
+              ]
             }
           },
           {
@@ -226,9 +235,9 @@
       "why": "The associate's question is really three retrievals: the MSA's termination clause, the SOW's narrowing clause, and the playbook rule that says which wins. Embed the whole sentence and the vector is the average of three documents — it points near none of them, and the search returns a muddle. Decompose it: retrieve the MSA clause, retrieve the SOW clause, retrieve the governing playbook rule for this client, then merge. Each sub-retrieval is sharp because it is one idea. This is runnable: the decomposed retrieval returns the two clauses and the playbook rule, each cited. The losing shape is the single embedding that averages three documents into zero.",
       "snippets": [
         {
-          "label": "The connection, from the secret. Same pattern as the filtered-query step: credentials from Secrets Manager, never inline.",
+          "label": "The Data API client, by secret ARN. Same pattern as the filtered-query step: credentials by reference, never inline.",
           "language": "python",
-          "source": "import boto3, json, psycopg\n\nsm = boto3.client(\"secretsmanager\", region_name=\"eu-central-1\")\ncreds = json.loads(sm.get_secret_value(SecretId=\"contract-db\")[\"SecretString\"])\nconn = psycopg.connect(host=creds[\"host\"], user=creds[\"username\"], password=creds[\"password\"], dbname=\"matters\")\n\nCLIENT = \"northwind\""
+          "source": "import boto3\n\n# The RDS Data API runs SQL over HTTPS: no driver, no connection pool, no VPC path\n# from the caller. It authenticates with the secret's ARN, never an inline password.\nrds = boto3.client(\"rds-data\", region_name=\"eu-central-1\")\nCLUSTER_ARN = \"arn:aws:rds:eu-central-1:111122223333:cluster:contract-db\"\nSECRET_ARN = \"arn:aws:secretsmanager:eu-central-1:111122223333:secret:contract-db-AbCdEf\"\n\nCLIENT = \"northwind\""
         },
         {
           "label": "Decompose into the three retrievals the question actually is, each a single idea.",
@@ -238,7 +247,7 @@
         {
           "label": "Retrieve each part under the same client filter, then merge. The playbook is retrieved, not a system prompt.",
           "language": "python",
-          "source": "cited = []\nfor part in parts:\n    emb = embed(part)\n    with conn.cursor() as cur:\n        cur.execute(\n            \"SELECT clause_id, text FROM clause \"\n            \"WHERE client = %s ORDER BY embedding <=> %s LIMIT 1\",\n            (CLIENT, emb),\n        )\n        cited.append(cur.fetchone())\nfor clause_id, text in cited:\n    print(clause_id, text)"
+          "source": "def embed(text):\n    # Stand-in for the Titan call the real Lambda makes (1024 floats).\n    return \"[0.021, -0.114, 0.067]\"\n\ncited = []\nfor part in parts:\n    res = rds.execute_statement(\n        resourceArn=CLUSTER_ARN,\n        secretArn=SECRET_ARN,\n        database=\"matters\",\n        sql=(\n            \"SELECT clause_id, text FROM clause \"\n            \"WHERE client = :client ORDER BY embedding <=> CAST(:q AS vector) LIMIT 1\"\n        ),\n        parameters=[\n            {\"name\": \"client\", \"value\": {\"stringValue\": CLIENT}},\n            {\"name\": \"q\", \"value\": {\"stringValue\": embed(part)}},\n        ],\n    )\n    cited.append((part, res[\"records\"]))\nfor part, records in cited:\n    for clause_id, text in records:\n        print(part, \"->\", clause_id[\"stringValue\"], text[\"stringValue\"])"
         },
         {
           "label": "From the terminal, confirm the Aurora cluster the query runs against is available — describe-db-clusters shows its status before you blame the SQL.",
@@ -261,10 +270,15 @@
         ],
         "responses": [
           {
-            "service": "secretsmanager",
-            "operation": "GetSecretValue",
+            "service": "rds-data",
+            "operation": "ExecuteStatement",
             "body": {
-              "SecretString": "{\"host\": \"contract-db.cluster-abc.eu-central-1.rds.amazonaws.com\", \"username\": \"desk\", \"password\": \"redacted-in-lab\", \"dbname\": \"matters\"}"
+              "records": [
+                [
+                  { "stringValue": "NW-MSA-14.2" },
+                  { "stringValue": "Either party may terminate for convenience on 60 days' written notice." }
+                ]
+              ]
             }
           },
           {

@@ -18,6 +18,15 @@ export interface GithubOidcStackProps extends StackProps {
    * existing one to reuse it instead of failing on create.
    */
   readonly existingProviderArn?: string;
+  /**
+   * Numeric GitHub owner and repository IDs. Repositories on GitHub's
+   * immutable subject format (new repos after 2026-07-15, or opted in) issue
+   * `sub` as `repo:OWNER@OWNER_ID/REPO@REPO_ID:...`, and a trust policy on the
+   * name-only form rejects every token. Read the format from
+   * `gh api repos/OWNER/REPO/actions/oidc/customization/sub`.
+   */
+  readonly ownerId?: string;
+  readonly repoId?: string;
 }
 
 /**
@@ -40,7 +49,14 @@ export class GithubOidcStack extends Stack {
         });
 
     const environment = props.environment ?? 'dev';
-    const subject = `repo:${props.owner}/${props.repo}:environment:${environment}`;
+    if (Boolean(props.ownerId) !== Boolean(props.repoId)) {
+      throw new Error('ownerId and repoId must be set together');
+    }
+    const repoSegment =
+      props.ownerId && props.repoId
+        ? `${props.owner}@${props.ownerId}/${props.repo}@${props.repoId}`
+        : `${props.owner}/${props.repo}`;
+    const subject = `repo:${repoSegment}:environment:${environment}`;
 
     const role = new Role(this, 'DeployRole', {
       roleName: `${props.repo}-github-deploy-${environment}`,

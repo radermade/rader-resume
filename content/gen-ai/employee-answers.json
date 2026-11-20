@@ -37,7 +37,7 @@
         {
           "label": "The Q Business runtime client and the signed-in user. The answer is scoped to who is asking.",
           "language": "python",
-          "source": "import boto3\n\nq = boto3.client(\"qbusiness\", region_name=\"eu-central-1\")\n\nAPP_ID = \"app-employee-answers\"\nUSER_ID = \"munich-engineer@corp.example\"  # the signed-in staff member"
+          "source": "import boto3\n\nq = boto3.client(\"qbusiness\", region_name=\"eu-central-1\")\n\nAPP_ID = \"a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d\"\nUSER_ID = \"munich-engineer@corp.example\"  # the signed-in staff member"
         },
         {
           "label": "chat_sync as that user. Q Business applies the source permissions, so only pages this user can open come back.",
@@ -47,7 +47,7 @@
         {
           "label": "From the terminal, confirm the application is wired to Identity Center before trusting the user scoping — get-application shows its identity type. User-level permissions only hold when the app resolves a real user.",
           "language": "shell",
-          "source": "aws qbusiness get-application --application-id app-employee-answers"
+          "source": "aws qbusiness get-application --application-id a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
         }
       ],
       "infrastructure": "// Q Business connects to the sources and answers as the signed-in user via\n// IAM Identity Center. The source enforces its own ACL; Q Business does not\n// re-implement it. chat_sync carries userId, so a page the user's group\n// cannot open never enters the answer. No second permission model to drift.",
@@ -81,7 +81,7 @@
             "service": "qbusiness",
             "operation": "GetApplication",
             "body": {
-              "applicationId": "app-employee-answers",
+              "applicationId": "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
               "displayName": "employee-answers",
               "identityType": "AWS_IAM_IDC",
               "status": "ACTIVE"

@@ -92,6 +92,12 @@ def _lab_before_call(params, **kwargs):
     ctx = params.get("context")
     if ctx is not None and model is not None:
         ctx["lab_operation"] = getattr(model, "name", None)
+        # The endpoint prefix botocore resolved. The first host label is not
+        # always the service: host-prefixed operations (Neptune Analytics puts
+        # the graph id in front, g-xyz.region.neptune-graph.amazonaws.com) move
+        # the service further right.
+        service_model = getattr(model, "service_model", None)
+        ctx["lab_service"] = getattr(service_model, "endpoint_prefix", None)
 
 
 import botocore.client
@@ -134,12 +140,12 @@ def _operation_from_request(request):
 
 
 def _intercepted_send(self, request):
-    service = _service_from_request(request)
+    services = {_service_from_request(request), (request.context or {}).get("lab_service")}
     action = _operation_from_request(request).lower()
 
     body = None
     for r in _RESPONSES:
-        if r["service"] == service and r["operation"].lower() == action:
+        if r["service"] in services and r["operation"].lower() == action:
             body = r["body"]
             break
 

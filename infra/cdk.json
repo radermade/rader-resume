@@ -11,6 +11,8 @@
     "hostedZoneId": "Z05927452DEMZDEUMM8PW",
     "githubOwner": "radermade",
     "githubRepo": "rader-resume",
+    "githubOwnerId": "259243262",
+    "githubRepoId": "1432275437",
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:defaultCrossStackReferences": "strong",
     "@aws-cdk/core:checkSecretUsage": true,

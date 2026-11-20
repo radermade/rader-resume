@@ -39,7 +39,7 @@
         {
           "label": "The Bedrock client, submitting a batch inference job over the night's records in S3.",
           "language": "python",
-          "source": "import boto3\n\nbedrock = boto3.client(\"bedrock\", region_name=\"eu-central-1\")\n\nINPUT = \"s3://claims-nightly/2026-11-02/input.jsonl\"\nOUTPUT = \"s3://claims-nightly/2026-11-02/output/\""
+          "source": "import boto3\n\nbedrock = boto3.client(\"bedrock\", region_name=\"eu-central-1\")\n\nINPUT = \"s3://claims-nightly/2026-11-02/input.jsonl\"\nOUTPUT = \"s3://claims-nightly/2026-11-02/output/\"\nbatchRoleArn = \"arn:aws:iam::111122223333:role/claims-batch-inference\""
         },
         {
           "label": "Submit the batch job. No caller waits; results land in S3 when the job finishes.",
@@ -94,7 +94,7 @@
         {
           "label": "Textract analyzes the scan for tables before the model sees anything. Located cells, not pixels.",
           "language": "python",
-          "source": "import boto3\n\ntextract = boto3.client(\"textract\", region_name=\"eu-central-1\")\n\nout = textract.analyze_document(\n    Document={\"S3Object\": {\"Bucket\": \"claims-nightly\", \"Name\": \"packet-0001.png\"}},\n    FeatureTypes=[\"TABLES\"],\n)\nblocks = [b for b in out[\"Blocks\"] if b[\"BlockType\"] == \"CELL\"]\nprint(len(blocks), \"table cells\")"
+          "source": "import boto3\n\ntextract = boto3.client(\"textract\", region_name=\"eu-central-1\")\n\nout = textract.analyze_document(\n    Document={\"S3Object\": {\"Bucket\": \"claims-nightly\", \"Name\": \"packet-0001.png\"}},\n    FeatureTypes=[\"TABLES\"],\n)\nblocks = [b for b in out[\"Blocks\"] if b[\"BlockType\"] == \"CELL\"]\nprint(len(blocks), \"table cells\")\nfor b in blocks:\n    print(b[\"RowIndex\"], b[\"ColumnIndex\"], b[\"Text\"])"
         },
         {
           "label": "From the terminal, confirm Textract is reachable in the Region before the batch depends on it — a quick list of nothing still proves the client.",

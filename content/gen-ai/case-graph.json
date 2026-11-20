@@ -83,12 +83,12 @@
         {
           "label": "The Neptune Analytics data-plane client. The query runs openCypher over the graph.",
           "language": "python",
-          "source": "import boto3\n\ngraph = boto3.client(\"neptune-graph\", region_name=\"eu-central-1\")\n\nGRAPH_ID = \"g-caseGraph01\"\nPERSON = \"p-北-Nordheim\"  # the person named in the referral"
+          "source": "import boto3\nimport json\n\ngraph = boto3.client(\"neptune-graph\", region_name=\"eu-central-1\")\n\nGRAPH_ID = \"g-caseGraph01\"\nPERSON = \"p-北-Nordheim\"  # the person named in the referral"
         },
         {
           "label": "Walk party -> filing -> statute, returning the signer, the filing, and the edge. The text chunk beside each filing node is the quote.",
           "language": "python",
-          "source": "q = (\n    \"MATCH (p:Party {id: $pid})-[:SIGNED]->(f:Filing)-[:CITES]->(s:Statute) \"\n    \"RETURN p.name AS signer, f.id AS filing, s.id AS statute, f.text AS quote\"\n)\nout = graph.execute_query(\n    graphIdentifier=GRAPH_ID,\n    queryString=q,\n    parameters={\"pid\": PERSON},\n    language=\"OPEN_CYPHER\",\n)\nfor row in out[\"results\"]:\n    print(row[\"signer\"], row[\"filing\"], row[\"statute\"])\n    print(row[\"quote\"])"
+          "source": "q = (\n    \"MATCH (p:Party {id: $pid})-[:SIGNED]->(f:Filing)-[:CITES]->(s:Statute) \"\n    \"RETURN p.name AS signer, f.id AS filing, s.id AS statute, f.text AS quote\"\n)\nout = graph.execute_query(\n    graphIdentifier=GRAPH_ID,\n    queryString=q,\n    parameters={\"pid\": PERSON},\n    language=\"OPEN_CYPHER\",\n)\n# The result document arrives as a streaming blob in \"payload\".\nresult = json.loads(out[\"payload\"].read())\nfor row in result[\"results\"]:\n    print(row[\"signer\"], row[\"filing\"], row[\"statute\"])\n    print(row[\"quote\"])"
         },
         {
           "label": "From the terminal, confirm the graph is available before you query it — get-graph shows its status. A query against a graph still in CREATING fails for a reason that has nothing to do with your Cypher.",
