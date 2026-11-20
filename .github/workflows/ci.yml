@@ -82,6 +82,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # cargo-lambda links arm64 Lambda binaries with Zig. pipx isolates the
+      # ziglang dependency it ships with, leaving no zig on PATH, so install
+      # Zig explicitly.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
       - name: Install cargo-lambda
         run: pipx install cargo-lambda
 
