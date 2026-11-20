@@ -1,0 +1,660 @@
+{
+  "schemaVersion": 1,
+  "id": "member-services",
+  "name": "Member services",
+  "summary": "A chat agent that looks up a member's order and drafts a reply, but must stop and hand a refund to a person rather than move money itself.",
+  "brief": {
+    "whoIsAsking": "A club member in a chat: 'where is order 4412,' and sometimes, in the same thread, 'refund it.' The order system is an existing REST API.",
+    "whatTheyNeedBack": "The shipment status drawn from the real order, and for a refund, a request that reaches a human reviewer — never money moved on the model's say-so.",
+    "systemsAlreadyRunning": "An existing order REST API. No classic agent to preserve — this is a new agent. The conversation path is not a fixed script: some turns answer from the order, some need a second call, and a refund turn must not be solved by the lookup tool.",
+    "breaksWhen": "The model moves money. A refund completed without a person is a loss and a regulatory problem at once, and no eval score makes it acceptable afterwards.",
+    "doneMeans": "The member gets the shipment status from the real order, a refund request reaches a reviewer and does not move money on the model's say-so, and an eval fails the run that finished the task with the wrong tool."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "member", "label": "Member chat", "flowsTo": ["agent"] },
+          { "id": "agent", "label": "AgentCore Runtime", "icon": "bedrock", "group": "acct", "flowsTo": ["gateway", "model"] },
+          { "id": "model", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" },
+          { "id": "gateway", "label": "AgentCore Gateway", "icon": "api-gateway", "group": "acct", "flowsTo": ["orderapi"] },
+          { "id": "orderapi", "label": "Order REST API", "group": "acct" },
+          { "id": "review", "label": "Step Functions + SNS", "group": "acct" },
+          { "id": "role", "label": "IAM tool roles", "icon": "iam", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A new agent starts on AgentCore",
+      "decision": "Whether to build this new agent as a classic Bedrock Agent or on AgentCore, given there is nothing already running to preserve.",
+      "why": "There is no classic agent here to keep compatible with. For a new agent, AgentCore is the current path: a managed runtime for the agent loop, a gateway to expose existing APIs as tools, and the primitives for sessions and return-of-control this scenario needs. Starting a brand-new build on the classic Agents stack would be choosing the older model for a greenfield case — the opposite of the benefits-agent scenario, where a classic agent already exists and is kept. Configuration: the lesson is choosing AgentCore for a new build, and recognizing that 'new agent' is the deciding fact.",
+      "snippets": [
+        {
+          "label": "An AgentCore Runtime for the new agent. Managed loop, sessions, and the hooks for return-of-control.",
+          "language": "typescript",
+          "source": "const runtime = new CfnRuntime(this, 'MemberAgent', {\n  agentRuntimeName: 'member-services',\n  networkConfiguration: { networkMode: 'PUBLIC' },\n  roleArn: agentRole.roleArn,\n});"
+        }
+      ],
+      "infrastructure": "// New agent, so AgentCore: a managed runtime for the loop, with sessions and return-of-control available. Classic Bedrock Agents are the choice when one already exists and must be preserved (see the benefits scenario). 'New agent' is the deciding fact here.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the AgentCore runtime from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: a new agent on AgentCore, because there is no classic agent to\n// preserve and AgentCore is the current path for a greenfield build.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The classic-vs-AgentCore decision turns almost entirely on whether\nsomething already exists. New build, no legacy dialogs to keep stable:\nAgentCore. A year-old classic agent a week before open enrollment: keep it\n(the benefits scenario). Choosing AgentCore is not 'the newer thing is\nbetter' — it is that a greenfield agent has none of the migration risk that\nmakes you preserve a classic one.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnRuntime",
+            "present": true,
+            "message": "An AgentCore runtime hosts the new agent's loop, with sessions and return-of-control available — the current path for a greenfield build."
+          },
+          {
+            "pattern": "member-services",
+            "present": true,
+            "message": "The runtime is named for this agent. One managed runtime owns the loop rather than hand-rolled orchestration."
+          },
+          {
+            "pattern": "CfnAgentAlias",
+            "present": false,
+            "message": "No classic-agent alias. That stack is for preserving an existing agent; this is a new build, so it starts on AgentCore."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The model chooses the tool",
+      "decision": "Whether the conversation follows a fixed workflow, or the model chooses which tool to call as the turn unfolds.",
+      "why": "The path is not knowable in advance. A tracking question might be answered from one order lookup, or need a second call for shipment status, and 'refund it' can appear halfway through. A fixed workflow — lookup, reply, done — cannot see the refund request arrive mid-turn, so it either misses it or mishandles it. The model choosing the tool per turn handles the branch: it calls the lookup for status and recognizes the refund as a different path. Configuration: the lesson is tool-choice over a fixed graph. The losing choice is the hardcoded workflow, simpler until the conversation changes direction, which is always.",
+      "snippets": [
+        {
+          "label": "The tools the model may choose from, declared to Converse. The model picks per turn; the code does not sequence them.",
+          "language": "typescript",
+          "source": "const toolConfig = {\n  tools: [\n    { toolSpec: { name: 'get_order_status', inputSchema: orderStatusSchema } },\n    { toolSpec: { name: 'request_refund', inputSchema: refundSchema } },\n  ],\n  // No fixed order. The model selects a tool given the turn.\n};"
+        }
+      ],
+      "infrastructure": "// The model chooses the tool each turn, because the conversation branches in ways a fixed workflow cannot anticipate — 'refund it' arriving in the middle of a tracking question. A hardcoded lookup-then-reply graph is simpler right up until the member changes direction, which is always.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the tool configuration from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the model selects from declared tools per turn, rather than a\n// fixed workflow that cannot see a refund appear mid-conversation.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'Agent' vs 'workflow' is the decision. A workflow (Step Functions, a fixed\ngraph) is right when the steps are known and ordered. An agent is right\nwhen the next step depends on what the user just said. This conversation is\nthe latter: tool choice is data-dependent per turn. The refund path being a\nseparate tool, not a branch inside a mega-tool, is what the next steps rely\non.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "get_order_status",
+            "present": true,
+            "message": "The lookup tool is declared for the model to choose when a turn is about order status."
+          },
+          {
+            "pattern": "request_refund",
+            "present": true,
+            "message": "The refund is a distinct tool, so the model can recognize a refund turn rather than a fixed workflow missing it."
+          },
+          {
+            "pattern": "No fixed order",
+            "present": true,
+            "message": "The model selects a tool per turn. A hardcoded sequence cannot see a refund request appear mid-conversation."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The Converse tool turn, your code runs the tool",
+      "decision": "Who executes the tool the model chose, and whether the model ever holds the order API's credentials.",
+      "why": "In the Converse tool-use protocol the model returns a toolUse block — the tool name and the arguments it wants — and stops. Your code runs the tool against the order API and returns a toolResult on the next turn. The model never calls the API and never holds its credentials: it proposes a call, your code decides whether and how to make it. This is runnable: the Converse call returns a toolUse for get_order_status, and your code would run it and feed the result back. The losing shape is giving the model direct API access, which collapses the boundary the whole design depends on — especially for the refund tool.",
+      "snippets": [
+        {
+          "label": "Converse with the tool config. The model returns a toolUse block and stops; it does not call the API.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"where is order 4412\"}]}],\n    toolConfig=TOOL_CONFIG,\n)\nprint(out[\"stopReason\"])  # tool_use"
+        },
+        {
+          "label": "Read the toolUse the model asked for. Your code runs it against the order API; the model never saw the credentials.",
+          "language": "python",
+          "source": "block = out[\"output\"][\"message\"][\"content\"][-1][\"toolUse\"]\nprint(block[\"name\"], block[\"input\"])\n# Next turn: you run the tool and return a toolResult to Converse."
+        },
+        {
+          "label": "From the terminal, list the models so you confirm the Converse model id is callable in this Region before wiring the loop.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+        }
+      ],
+      "infrastructure": "// The Converse tool protocol: the model emits a toolUse block (name plus arguments) and stops with stopReason tool_use. Your code runs the tool and returns a toolResult next turn. The model proposes; your code disposes. It never holds the order API's credentials, which is the boundary the refund safety rests on.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the Converse tool turn from the snippets on the left, then Run.\n# The intercept returns a tool_use stop and a toolUse block for the lookup.\n#\n# The goal: see the model PROPOSE a tool call and stop, so your code is the\n# thing that actually runs it.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "stopReason tool_use is the signal to run a tool and come back. The loop is:\nConverse, then tool_use, then your code runs the tool, then Converse with\nthe toolResult, then end_turn (or another tool_use). The model holding no\ncredentials is not a nicety: it is why a prompt-injected 'refund\neverything' cannot move money — the model can only propose request_refund,\nand your code routes that to a human, never to a completed API call.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": {
+                "message": {
+                  "role": "assistant",
+                  "content": [
+                    { "text": "Let me look up that order." },
+                    { "toolUse": { "toolUseId": "tu-1", "name": "get_order_status", "input": { "orderId": "4412" } } }
+                  ]
+                }
+              },
+              "stopReason": "tool_use"
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": {
+              "modelSummaries": [
+                { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Validate arguments before the API",
+      "decision": "Whether the model's tool arguments go straight to the order API, or are validated first.",
+      "why": "The model can invent an order id, a negative amount, or a refund for an order never looked up. Those arguments must be validated before they reach the API: the order id belongs to the session's member, the amount is positive and within the order total, the order exists. A model-invented order id does not get to the refund path. This is runnable: the lookup returns a real order the validator checks against, and a fabricated id fails. The losing shape is trusting the model's arguments because they are well-formed JSON — well-formed and correct are different, and the gap is where a hallucinated refund lives.",
+      "snippets": [
+        {
+          "label": "Validate the tool arguments against the session and the order before any API call.",
+          "language": "python",
+          "source": "def validate_refund(args, session):\n    if args[\"orderId\"] not in session[\"member_orders\"]:\n        raise ValueError(\"order not owned by this member\")\n    if not (0 < args[\"amount\"] <= session[\"order_total\"][args[\"orderId\"]]):\n        raise ValueError(\"amount out of range\")\n    return True"
+        },
+        {
+          "label": "Look up the real order to validate against, through the AgentCore runtime. A fabricated id has no status and fails before the refund path.",
+          "language": "python",
+          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\nout = agent.invoke_agent_runtime(\n    agentRuntimeArn=\"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/member-services\",\n    runtimeSessionId=\"sess-4412\",\n    payload=json.dumps({\"tool\": \"get_order_status\", \"input\": {\"orderId\": \"4412\"}}),\n)\nprint(out[\"state\"], out[\"orderTotal\"])"
+        },
+        {
+          "label": "From the terminal, list the gateway's targets so you confirm the order API is exposed before the validator calls it.",
+          "language": "shell",
+          "source": "aws bedrock-agentcore-control list-gateway-targets --gateway-identifier gw-member-orders"
+        }
+      ],
+      "infrastructure": "// Arguments are validated before the API: the order id belongs to the session's member, the amount is positive and within the order total, the order exists. A model-invented id fails validation and never reaches the refund path. Well-formed JSON is not correct JSON, and the gap is where a hallucinated refund would live.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the argument validation from the snippets on the left, then Run.\n# The intercept returns a real order the validator checks against.\n#\n# The goal: the model's arguments are checked against the session and the\n# real order before any API call, so a fabricated id cannot reach a refund.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Defense in depth with the schema step: the schema makes the right tool easy\nto pick, and validation makes a wrong ARGUMENT impossible to act on. Both\nmatter because the two failures differ — a wrong tool and a right tool with\ninvented inputs. The validator checks ownership, range, and existence\nagainst the session and the looked-up order, not the model's claim.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agentcore",
+            "operation": "InvokeAgentRuntime",
+            "body": {
+              "state": "SHIPPED",
+              "orderTotal": 118.0,
+              "trackingId": "TRK-4412"
+            }
+          },
+          {
+            "service": "bedrock-agentcore-control",
+            "operation": "ListGatewayTargets",
+            "body": {
+              "items": [
+                { "targetId": "tgt-orders", "name": "order-api", "status": "READY" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A schema specific enough to pick the right tool",
+      "decision": "Whether the tools share a vague operation, or each has a schema specific enough that the model cannot confuse them.",
+      "why": "If the lookup and the refund share a vague do_order(action, orderId), the model infers intent from a free-text field, and a tracking question phrased oddly can slip into the refund branch. The schema is a safety control: the status tool takes an orderId; the refund tool takes an orderId, an amount, and a reason, and is documented as requiring human confirmation. Distinct shapes make the refund tool hard to select by accident. Configuration: the lesson is schema specificity as a guardrail. The losing choice is the catch-all operation, which pushes the tool-choice risk onto the model's reading of an ambiguous string.",
+      "snippets": [
+        {
+          "label": "Two specific schemas. The refund schema's shape and description make it hard to pick by accident.",
+          "language": "typescript",
+          "source": "const orderStatusSchema = {\n  type: 'object',\n  properties: { orderId: { type: 'string', description: 'The order to look up status for.' } },\n  required: ['orderId'],\n};\nconst refundSchema = {\n  type: 'object',\n  description: 'Request a refund. Requires human confirmation; does not complete a refund.',\n  properties: { orderId: { type: 'string' }, amount: { type: 'number' }, reason: { type: 'string' } },\n  required: ['orderId', 'amount', 'reason'],\n};"
+        }
+      ],
+      "infrastructure": "// The schemas are specific so the model cannot confuse the tools. A vague do_order(action, orderId) forces the model to infer intent from a string, and a mis-read puts a tracking turn on the refund path. Distinct shapes, and a refund description that states 'requires human confirmation', make the dangerous tool hard to select by accident.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the two tool schemas from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: schemas specific enough that 'where is my order' and 'refund\n// it' cannot collapse into one ambiguous operation.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The schema is a guardrail, not just an interface. A good tool schema makes\nthe right tool obvious and the wrong tool awkward: required fields the\nwrong intent cannot fill, descriptions that state the tool's limits,\nnames that do not overlap. The catch-all do_order is the anti-pattern — it\nmoves the whole tool-choice decision into the model's interpretation of a\nfree-text action, which is exactly where the refund decision must not live.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "Requires human confirmation",
+            "present": true,
+            "message": "The refund schema's description states it requires human confirmation and does not complete a refund — the schema carries the limit."
+          },
+          {
+            "pattern": "required: ['orderId', 'amount', 'reason']",
+            "present": true,
+            "message": "The refund tool's required fields are specific, so the wrong intent cannot fill them and the tool is hard to pick by accident."
+          },
+          {
+            "pattern": "do_order",
+            "present": false,
+            "message": "No vague catch-all operation. A single do_order forces the model to infer intent from a string, which is where a tracking turn slips onto the refund path."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Gateway exposes the REST API as MCP tools",
+      "decision": "Whether to rewrite the order service for the agent, or expose the existing REST API as tools through AgentCore Gateway.",
+      "why": "The order REST API already exists and works. AgentCore Gateway takes an API spec and exposes its operations as MCP tools the agent can call, with auth and transformation handled at the gateway — so you do not rewrite the order service into agent-native tools. The gateway is the adapter between the agent's tool protocol and the API you already have. Configuration: the lesson is the gateway as the API-to-tools adapter. The losing choice is reimplementing the order API as bespoke Lambda tools, duplicating a service that already exists and creating a second thing to keep in sync.",
+      "snippets": [
+        {
+          "label": "A gateway target that exposes the existing order API as MCP tools from its spec.",
+          "language": "typescript",
+          "source": "const gateway = new CfnGateway(this, 'OrderGateway', {\n  name: 'member-orders',\n  protocolType: 'MCP',\n});\nconst target = new CfnGatewayTarget(this, 'OrderApiTarget', {\n  gatewayIdentifier: gateway.attrGatewayId,\n  targetConfiguration: { mcp: { openApiSchema: { s3: { uri: orderApiSpecUri } } } },\n});"
+        }
+      ],
+      "infrastructure": "// AgentCore Gateway turns the existing order REST API into MCP tools from its OpenAPI spec, handling auth and shape at the gateway. The order service is not rewritten. Reimplementing it as bespoke Lambda tools would duplicate a working service and create a second thing to keep in sync.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the gateway and its target from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the existing order API is exposed as MCP tools via the gateway,\n// not rewritten into agent-native code.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The gateway is the 'do not rewrite the backend' primitive. It reads the\nOpenAPI spec and presents each operation as an MCP tool, so the agent calls\nget_order_status and the gateway maps it to the real GET /orders/{id}. This\nis also where tool-level auth lives, which matters for the IAM step: the\nrefund operation and the lookup operation can be exposed with different\ncredentials, so the lookup role genuinely cannot call the refund operation.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnGateway",
+            "present": true,
+            "message": "An AgentCore Gateway fronts the agent's tools, exposing the existing API rather than a rewrite."
+          },
+          {
+            "pattern": "openApiSchema",
+            "present": true,
+            "message": "The gateway target reads the order API's OpenAPI spec and exposes its operations as MCP tools, so the service is adapted, not reimplemented."
+          },
+          {
+            "pattern": "protocolType: 'MCP'",
+            "present": true,
+            "message": "The gateway speaks MCP to the agent, the adapter between the tool protocol and the existing REST API."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Return of control for the refund",
+      "decision": "Whether the refund tool completes in the agent, or returns control to the club's own process for a person to confirm.",
+      "why": "The refund must not be a tool the model completes. Return of control is the mechanism: when the agent selects the refund path, instead of executing it, control returns to the caller — the club's process — with the proposed refund, and a person confirms it there. The model proposes; the club's process decides and acts. This is the structural answer to the Breaks when: the model cannot move money because the money-moving step is not wired to the model's output at all, it is wired to a human decision. Configuration: the lesson is return-of-control on the refund. The losing choice is a refund tool that calls the refund API directly, which is the Breaks when built in.",
+      "snippets": [
+        {
+          "label": "The refund tool returns control instead of executing. The caller's process, not the model, completes it.",
+          "language": "typescript",
+          "source": "const refundTool = {\n  name: 'request_refund',\n  // returnControl: the agent hands the proposed refund back to the caller\n  // and does NOT execute it. A human confirms in the club's process.\n  returnControl: true,\n};\n// There is deliberately no refund execution binding on this tool."
+        }
+      ],
+      "infrastructure": "// request_refund returns control to the caller rather than executing. The agent surfaces the proposed refund — order, amount, reason — and stops; the club's process puts it in front of a reviewer who confirms and acts. The money-moving step is wired to a human decision, not the model's output, which is why the model cannot move money.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the return-of-control refund tool from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the refund tool returns the proposal to the caller's process\n// and does not execute, so a person confirms before money moves.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Return of control is the opposite of a fulfilled tool. A fulfilled tool\nruns and returns a result the model continues from. A return-of-control\ntool stops the loop and hands the proposed action to the caller, who is\noutside the model entirely. For the refund, that caller is the club's\nreview process. This is the single most important decision in the\nscenario: it is the structural reason 'the model moves money' cannot\nhappen, independent of the model's judgment.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "returnControl: true",
+            "present": true,
+            "message": "The refund tool returns control to the caller instead of executing. The model proposes; the club's process decides."
+          },
+          {
+            "pattern": "does NOT execute",
+            "present": true,
+            "message": "The tool does not execute the refund. The money-moving step is wired to a human decision, not the model's output — the structural answer to the Breaks when."
+          },
+          {
+            "pattern": "refundApi.invoke",
+            "present": false,
+            "message": "No direct refund-API call on the tool. A tool that invoked the refund API is the Breaks when built in."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A task token with a timeout, SNS to the reviewer",
+      "decision": "How the paused refund turn waits for a human, and what happens if the confirmation never comes.",
+      "why": "When control returns for a refund, the turn pauses waiting for a person. A Step Functions task token holds that pause: the workflow parks on waitForTaskToken, an SNS notification reaches the reviewer, and the token resumes the workflow when they confirm. The timeout is the essential part — a confirmation that never arrives must end the turn, not hang forever. Without a timeout, an abandoned review is a stuck execution. Configuration: the lesson is the token plus the timeout plus the notification. The losing choice is a pause with no timeout, which turns an unreviewed refund into a workflow that never completes and a member who never hears back.",
+      "snippets": [
+        {
+          "label": "A waitForTaskToken step with a timeout, and an SNS publish to the reviewer. A confirmation that never arrives ends the turn.",
+          "language": "typescript",
+          "source": "const awaitReview = new CallAwsService(this, 'AwaitRefundReview', {\n  service: 'sns', action: 'publish',\n  integrationPattern: IntegrationPattern.WAIT_FOR_TASK_TOKEN,\n  heartbeatTimeout: Timeout.duration(Duration.hours(24)),\n  parameters: { TopicArn: reviewTopicArn, Message: JsonPath.stringAt('$.refund') },\n});"
+        }
+      ],
+      "infrastructure": "// The refund turn parks on a Step Functions waitForTaskToken with a 24h timeout, and an SNS publish notifies the reviewer. Confirming resumes the token; the timeout ends the turn if no one does. A pause with no timeout is a stuck execution and a member who never hears back — an abandoned review must not hang the workflow.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the task-token review step from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the refund pause is a task token with a timeout and an SNS\n// notification, so an unanswered review ends the turn rather than hanging.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is the interactive-workflow pattern from the serverless standards: a\nStandard workflow pausing on a task token, which costs nothing while it\nwaits. The token is a bearer credential for resuming — it lives\nserver-side, never in a response to the member. The timeout is the part\npeople skip and regret: without it, every abandoned review is an execution\nthat waits up to a year, and the member's turn never resolves.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "WAIT_FOR_TASK_TOKEN",
+            "present": true,
+            "message": "The refund pause is a waitForTaskToken step, so the workflow parks until a human confirms and the token resumes it."
+          },
+          {
+            "pattern": "heartbeatTimeout",
+            "present": true,
+            "message": "A timeout bounds the wait. A confirmation that never arrives ends the turn rather than hanging the execution forever."
+          },
+          {
+            "pattern": "action: 'publish'",
+            "present": true,
+            "message": "An SNS publish notifies the reviewer, so the parked refund reaches a person who can confirm it."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A step cap, a tool timeout, a definition of done",
+      "decision": "What stops the agent from calling tools indefinitely, and how it knows the turn is finished.",
+      "why": "An agent loop with no limit keeps calling tools because the answer could always be a little more complete. Three bounds stop that: a step cap (a maximum number of tool calls per turn), a per-tool timeout (a slow API does not stall the turn), and an explicit definition of done (the condition under which the agent stops and replies). Without them a runaway loop burns tokens and latency chasing a marginally better answer. Configuration: the lesson is the three bounds. The losing choice is an unbounded loop, a cost and latency problem on a good day and a wedged turn on a bad one.",
+      "snippets": [
+        {
+          "label": "The three bounds: a step cap, a tool timeout, and a done condition.",
+          "language": "typescript",
+          "source": "const loopBounds = {\n  maxToolCalls: 6,        // step cap per turn\n  toolTimeoutSeconds: 10, // a slow API does not stall the turn\n  doneWhen: 'the member question is answered or a refund is proposed',\n};"
+        }
+      ],
+      "infrastructure": "// Three bounds on the loop: maxToolCalls caps the steps per turn, toolTimeoutSeconds stops a slow API stalling it, and a done condition tells the agent when to stop and reply. An unbounded loop keeps calling tools for a marginally better answer — tokens and latency on a good day, a wedged turn on a bad one.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the loop bounds from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: a step cap, a per-tool timeout, and an explicit done condition,\n// so the agent stops instead of looping for a better answer.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'Definition of done' is the one teams forget. A step cap and a timeout are\nmechanical; the done condition is semantic — the agent needs to know that\n'answered the question or proposed a refund' is a complete turn, or it will\ncall another tool just in case. For this agent, proposing a refund (return\nof control) is a terminal state for the turn, which the done condition has\nto name explicitly or the loop treats the pause as 'not done yet.'\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "maxToolCalls",
+            "present": true,
+            "message": "A step cap bounds the tool calls per turn, so the loop cannot run indefinitely."
+          },
+          {
+            "pattern": "toolTimeoutSeconds",
+            "present": true,
+            "message": "A per-tool timeout stops a slow API from stalling the whole turn."
+          },
+          {
+            "pattern": "doneWhen",
+            "present": true,
+            "message": "An explicit done condition tells the agent when the turn is complete, so it stops rather than calling another tool for a marginally fuller answer."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "IAM is the blast radius",
+      "decision": "Whether the lookup and the refund run under one role, or separate roles so the lookup cannot reach the refund API.",
+      "why": "The tool role is the real blast radius. If the lookup tool and the refund path share a role that can call both, then a compromised or misdirected lookup can reach the refund API — the application-layer controls (schema, validation, return of control) are the only thing standing between a wrong turn and a refund. Separate roles make it structural: the lookup role can call the status operation and nothing on the refund API, so even a fully hijacked lookup cannot move money. Configuration: the lesson is per-tool least privilege. The losing choice is one agent role with both permissions, which makes IAM agree with the worst case instead of preventing it.",
+      "snippets": [
+        {
+          "label": "Two roles: the lookup role reaches only the status operation, the refund proposal role reaches only the review topic.",
+          "language": "typescript",
+          "source": "lookupRole.addToPolicy(new PolicyStatement({\n  actions: ['execute-api:Invoke'],\n  resources: [orderStatusApiArn],\n}));\n// The lookup role has NO permission on the refund API or the review topic.\nrefundProposalRole.addToPolicy(new PolicyStatement({\n  actions: ['sns:Publish'],\n  resources: [reviewTopicArn],\n}));"
+        }
+      ],
+      "infrastructure": "// Per-tool roles are the blast radius. The lookup role can invoke the status operation and nothing else; the refund path can publish to the review topic and nothing else. Neither can call the refund API directly, so even a hijacked lookup cannot move money. One shared role would make IAM permit the worst case the app layer is trying to prevent.",
+      "workbench": {
+        "open": "policy.ts",
+        "files": [
+          {
+            "path": "policy.ts",
+            "body": "// Assemble the per-tool roles from the snippet on the left. Configuration\n// step: the sandbox has no principals, so there is nothing to Run.\n//\n// The goal: the lookup role cannot reach the refund API, so IAM enforces\n// the boundary structurally, not just the schema and validation.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Defense in depth, bottom layer. The schema makes the wrong tool hard to\npick, validation makes a bad argument hard to act on, return of control\nkeeps a human in the refund — and IAM makes the refund API unreachable from\nthe lookup role regardless of all of that. The question to ask of any agent\nis 'if the model were fully adversarial, what could this role do?' Here the\nanswer for the lookup role is: read order status, nothing more.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "lookupRole",
+            "present": true,
+            "message": "The lookup role is scoped to the status operation, so it can read order status and nothing else."
+          },
+          {
+            "pattern": "NO permission on the refund API",
+            "present": true,
+            "message": "The lookup role has no permission on the refund API or the review topic. Even a hijacked lookup cannot move money."
+          },
+          {
+            "pattern": "refundProposalRole",
+            "present": true,
+            "message": "The refund proposal runs under its own role scoped to the review topic — per-tool least privilege, not one shared agent role."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Trace off once the path is understood",
+      "decision": "Whether agent trace stays on in production, given the trace holds the order details.",
+      "why": "Trace is invaluable while debugging the tool-choice path: it shows which tool the model picked and why. But the trace holds the order details — the member's order, amounts, the arguments — so leaving it on in production is logging sensitive data on every turn. Trace is a debugging tool, turned off once the path is understood. Configuration: the lesson is trace off in production. The losing choice is leaving trace on because it was useful during development, which quietly accumulates order data in logs the review never scoped for it.",
+      "snippets": [
+        {
+          "label": "Trace enabled only outside production. In production it is off, because the trace holds the order.",
+          "language": "typescript",
+          "source": "const enableTrace = stage !== 'prod';\n// Trace shows the tool-choice reasoning — and the order details that\n// reasoning ran over. Debugging only; off in production."
+        }
+      ],
+      "infrastructure": "// Agent trace is on in dev to debug tool choice and off in production. The trace records the order details the reasoning ran over, so leaving it on accumulates member order data in logs. It is a debugging tool, not a production setting — the same discipline as guardrail trace in the clinical and policy scenarios.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the trace setting from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: trace on in dev, off in prod, because the trace holds the order\n// details and production should not log them every turn.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "A recurring rule across these scenarios: trace (agent trace here, guardrail\ntrace elsewhere) is a debugging aid that necessarily contains the sensitive\nthing it was tracing. Here it is the order and the refund arguments. The\nfix is the same every time — on in dev, off in prod — and the reasoning is\nthe same: the trace is the one place the data you blocked everywhere else\nleaks back in.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "stage !== 'prod'",
+            "present": true,
+            "message": "Trace is enabled only outside production, so production turns do not log the order details the trace holds."
+          },
+          {
+            "pattern": "off in production",
+            "present": true,
+            "message": "Trace is a debugging tool, off in production. Leaving it on accumulates member order data in logs the review never scoped for it."
+          },
+          {
+            "pattern": "enableTrace = true",
+            "present": false,
+            "message": "Trace is not hardcoded on. It is tied to the stage, so production gets it off by default."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A tool-choice eval",
+      "decision": "Whether the eval scores only the final sentence, or whether the agent chose the right tool.",
+      "why": "An agent can produce a perfectly fluent reply while having done the wrong thing — answered a refund request with the lookup tool, or completed a task the wrong way. Scoring only the output sentence misses this: the words read fine. A tool-choice eval checks the trajectory — did the agent call the right tool for the turn — and fails the run that finished with the wrong tool even when the sentence is good. For this agent, a turn that 'handled' a refund via the lookup tool is a failure regardless of how it reads. Configuration: the lesson is evaluating the tool trajectory, not just the text. The losing choice is a text-only eval that passes a dangerous wrong-tool run.",
+      "snippets": [
+        {
+          "label": "The eval asserts the tool trajectory, not just the final text. A refund turn must have chosen the refund path.",
+          "language": "typescript",
+          "source": "const toolChoiceEval = {\n  metric: 'correct_tool_for_turn',\n  cases: [\n    { utterance: 'refund it', expectedTool: 'request_refund' },\n    { utterance: 'where is order 4412', expectedTool: 'get_order_status' },\n  ],\n  failsWhen: 'the trajectory used the wrong tool, even if the reply reads well',\n};"
+        }
+      ],
+      "infrastructure": "// The eval scores the tool trajectory: for each utterance, did the agent pick the expected tool. A refund utterance that was 'handled' by the lookup tool fails, even if the reply is fluent. Text-only evals pass a dangerous wrong-tool run because the sentence reads fine — the failure is in what the agent did, not what it said.",
+      "workbench": {
+        "open": "eval.ts",
+        "files": [
+          {
+            "path": "eval.ts",
+            "body": "// Assemble the tool-choice eval from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the eval fails a run that used the wrong tool, so a fluent\n// reply cannot hide a refund handled by the lookup path.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Agent evals have to score trajectory, not just output, because an agent's\nmistakes are in its actions. 'Finished the task with the wrong tool' is the\nDone means failure spelled out: the eval exists to catch it. Pair this with\na safety gate separate from quality — a wrong-tool refund is a safety\nfailure that blocks regardless of how the quality score lands, the same\nseparation the policy assistant's eval step draws.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "correct_tool_for_turn",
+            "present": true,
+            "message": "The eval metric is the tool chosen per turn, not the final text — it scores what the agent did."
+          },
+          {
+            "pattern": "expectedTool: 'request_refund'",
+            "present": true,
+            "message": "A refund utterance is expected to choose the refund path; handling it with the lookup tool fails the case."
+          },
+          {
+            "pattern": "even if the reply reads well",
+            "present": true,
+            "message": "A fluent reply does not pass a wrong-tool run. The failure is in the trajectory, which a text-only eval would miss."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The session that hangs because the result was never posted",
+      "decision": "What to do when a session is stuck after a tool ran but never returned its result to the agent.",
+      "why": "The agent loop is: the model asks for a tool, your code runs it, your code posts the result back to the session, the loop continues. If the tool ran but the result was never posted — the code crashed after calling the API, or the post failed silently — the session hangs waiting for a result that will never come. The fix is to post the tool result to that session, resuming the loop where it stalled. It is not to start a new agent, which loses the conversation and the member's context. This is runnable: posting the missing result to the stuck session resumes it. The losing move is treating a stalled session as a broken agent and restarting from zero.",
+      "snippets": [
+        {
+          "label": "The agent-core runtime client, pointed at the stuck session.",
+          "language": "python",
+          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\n\nRUNTIME_ARN = \"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/member-services\"\nSESSION_ID = \"sess-4412-stuck\"  # the session waiting on a tool result"
+        },
+        {
+          "label": "Post the missing tool result to that session. The loop resumes where it stalled; no new agent, no lost context.",
+          "language": "python",
+          "source": "out = agent.invoke_agent_runtime(\n    agentRuntimeArn=RUNTIME_ARN,\n    runtimeSessionId=SESSION_ID,\n    payload=json.dumps({\n        \"toolResult\": {\"toolUseId\": \"tu-7\", \"content\": [{\"json\": {\"state\": \"SHIPPED\"}}]}\n    }),\n)\nprint(out[\"statusCode\"])  # the session continues from the stall"
+        },
+        {
+          "label": "From the terminal, confirm the runtime is healthy before you blame the session — get-agent-runtime shows its status.",
+          "language": "shell",
+          "source": "aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id member-services"
+        }
+      ],
+      "infrastructure": "// A session hangs when a tool ran but its result was never posted back — the loop is waiting for a toolResult that never arrived. The fix is to post the result to that session and let the loop resume; the conversation and the member's context are intact. Starting a new agent throws both away to 'fix' a stall that was one missing post.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the session-resume from the snippets on the left, then Run. The\n# intercept accepts the posted tool result and the session continues.\n#\n# The goal: a stuck session is resumed by posting the missing tool result,\n# not by starting a new agent and losing the conversation.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The stall is almost always on your side of the loop: the model asked for a\ntool, the tool ran, and the toolResult post failed or never happened. The\nsession is fine — it is paused, waiting. Diagnosing it as a broken agent\nand restarting is the costly wrong turn: you lose the thread the member was\nin. The right move posts the result for that toolUseId, and the loop picks\nup exactly where it stalled.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agentcore",
+            "operation": "InvokeAgentRuntime",
+            "body": {
+              "statusCode": 200,
+              "runtimeSessionId": "sess-4412-stuck",
+              "resumed": true
+            }
+          },
+          {
+            "service": "bedrock-agentcore-control",
+            "operation": "GetAgentRuntime",
+            "body": {
+              "agentRuntimeId": "member-services",
+              "status": "READY"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

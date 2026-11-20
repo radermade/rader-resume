@@ -65,11 +65,8 @@ class Workbench {
     // hold the worker URL separately.
     this.data = data.workbench;
     this.workerUrl = data.workerUrl;
-    // A configuration step seeds a CDK/config artifact to assemble, not Python
-    // to run. When false, there is no Pyodide and no CLI; instead Run checks
-    // the assembled artifact against `checks` — the step's answer key — so the
-    // visitor gets real feedback on whether they assembled it correctly.
-    // Default true for safety if the flag is missing.
+    // A runnable step has an intercept to submit against, so it gets the
+    // terminal; a pure configuration step does not. The editor always renders.
     this.runnable = data.runnable !== false;
     this.checks = data.checks || [];
     this.worker = null;
@@ -111,16 +108,36 @@ class Workbench {
     this.render();
   }
 
+  /** Whether the file at `path` runs Python against the intercept (`.py`) or
+   *  is checked against the answer key (`.ts`). The action button follows
+   *  this, so a single editor serves both: open a .py file and the button is
+   *  Run, open a .ts file and it is Check. A file that is neither (NOTES.md)
+   *  is readable but has no action, which `isRunnablePath`/`isCheckPath`
+   *  below both report false for. */
+  isRunnablePath(path) {
+    return path.endsWith('.py');
+  }
+
+  isCheckPath(path) {
+    return path.endsWith('.ts');
+  }
+
   render() {
     const tree = this.root.querySelector('.lab-files');
     const editor = this.root.querySelector('.lab-editor');
     const output = this.root.querySelector('.lab-output');
     const cli = this.root.querySelector('.lab-cli');
+    const cliOutput = this.root.querySelector('.lab-cli-output');
 
     // Drop the no-script fallback once we are live.
     const fallback = this.root.querySelector('noscript');
     if (fallback) fallback.remove();
 
+    // One editor, one buffer Map, every seeded file in it. The file tree
+    // switches between all of them — .py, .ts, and NOTES.md alike — and the
+    // action button follows whichever is open. There is no second editor and
+    // no file held out of the tree, so there is no pair of buffers to fight
+    // over one file.
     tree.innerHTML = '';
     const list = document.createElement('ul');
     list.className = 'lab-file-list';
@@ -136,123 +153,161 @@ class Workbench {
     }
     tree.appendChild(list);
 
-    // Editor: a textarea with a line-number gutter. A traceback names a line,
-    // so the gutter is function, not decoration.
-    editor.innerHTML = '';
-    const wrap = document.createElement('div');
-    wrap.className = 'lab-editor__wrap';
-    this.gutter = document.createElement('div');
-    this.gutter.className = 'lab-editor__gutter';
-    this.gutter.setAttribute('aria-hidden', 'true');
-    this.textarea = document.createElement('textarea');
-    this.textarea.className = 'lab-editor__area';
-    this.textarea.spellcheck = false;
-    this.textarea.setAttribute('aria-label', 'Code editor');
-    // Announce the dropdown as a combobox so a screen reader is told the
-    // input controls a popup listbox.
-    this.textarea.setAttribute('role', 'combobox');
-    this.textarea.setAttribute('aria-autocomplete', 'list');
-    this.textarea.setAttribute('aria-expanded', 'false');
-    this.textarea.addEventListener('input', () => {
-      this.syncGutter();
-      this.requestCompletions();
-    });
-    this.textarea.addEventListener('scroll', () => {
-      this.gutter.scrollTop = this.textarea.scrollTop;
-      this.closeCompletions();
-    });
-    this.textarea.addEventListener('blur', () => {
-      // A click on a dropdown item fires before blur resolves, so defer the
-      // close enough to let the item's handler run.
-      setTimeout(() => this.closeCompletions(), 120);
-    });
-    this.textarea.addEventListener('keydown', (ev) => this.onEditorKey(ev));
-    wrap.appendChild(this.gutter);
-    wrap.appendChild(this.textarea);
+    // One buffer per file. Switching tabs saves the current buffer into this
+    // Map and loads the next, so an edit to the .ts file survives a detour
+    // through the .py file and back.
+    this.files = new Map(this.data.files.map((f) => [f.path, f.body]));
 
-    // The completion dropdown. A listbox positioned under the caret, hidden
-    // until there is something to show. Pure DOM, no library.
-    this.menu = document.createElement('ul');
-    this.menu.className = 'lab-complete';
-    this.menu.id = 'lab-complete';
-    this.menu.setAttribute('role', 'listbox');
-    this.menu.setAttribute('aria-label', 'Completions');
-    this.menu.hidden = true;
-    this.textarea.setAttribute('aria-controls', 'lab-complete');
-    wrap.appendChild(this.menu);
-
-    editor.appendChild(wrap);
-
+    // Reset editor state a previous step's render left behind.
+    this.textarea = null;
+    this.gutter = null;
+    this.menu = null;
     this.output = output;
+    this.cliOutput = null;
+    this.cliInput = null;
+    // Which pane a pending worker run writes its result to. The editor Run and
+    // the terminal run share one worker and one filesystem; the path they
+    // write disambiguates, but the result message does not carry it, so the
+    // pane is tracked here between the postMessage and the reply.
+    this.pendingRunPane = 'editor';
+    editor.innerHTML = '';
+    output.textContent = '';
+    cli.innerHTML = '';
+    if (cliOutput) cliOutput.textContent = '';
 
+    // The single editor: a textarea with a line-number gutter (a traceback
+    // names a line, so the gutter is function) and the completion dropdown.
+    const built = this.buildCodeEditor(editor);
+    this.textarea = built.textarea;
+    this.gutter = built.gutter;
+    this.menu = built.menu;
+
+    // The action button follows the open file's extension, so its label is
+    // set in `open()` rather than here. Run executes the buffer against the
+    // intercept; Check grades it against the answer key. One button, two jobs.
+    const actionBtn = document.createElement('button');
+    actionBtn.type = 'button';
+    actionBtn.className = 'lab-run';
+    actionBtn.addEventListener('click', () => this.action());
+    this.actionBtn = actionBtn;
+
+    const stopBtn = document.createElement('button');
+    stopBtn.type = 'button';
+    stopBtn.className = 'lab-stop';
+    stopBtn.textContent = 'Stop';
+    stopBtn.disabled = true;
+    stopBtn.addEventListener('click', () => this.stop());
+    this.stopBtn = stopBtn;
+
+    editor.appendChild(actionBtn);
+    editor.appendChild(stopBtn);
+
+    // The terminal: always present on a runnable step, where the intercept it
+    // submits to exists. One `aws` line, no pre-fill and no authored answer
+    // key — the visitor types a full command and botocore's acceptance or
+    // rejection is the whole verification. A pure configuration step has no
+    // intercept, so no terminal.
     if (this.runnable) {
-      // A runnable step: Run, Stop, the CLI, and the Pyodide runtime.
-      const runBtn = document.createElement('button');
-      runBtn.type = 'button';
-      runBtn.className = 'lab-run';
-      runBtn.textContent = 'Run';
-      runBtn.addEventListener('click', () => this.run());
-
-      const stopBtn = document.createElement('button');
-      stopBtn.type = 'button';
-      stopBtn.className = 'lab-stop';
-      stopBtn.textContent = 'Stop';
-      stopBtn.disabled = true;
-      stopBtn.addEventListener('click', () => this.stop());
-      this.stopBtn = stopBtn;
-
-      editor.appendChild(runBtn);
-      editor.appendChild(stopBtn);
-
-      this.output.textContent = 'Loading the runtime…';
-
-      // CLI: one line, mapped onto the same intercepted client.
-      cli.innerHTML = '';
+      this.cliOutput = cliOutput;
       const form = document.createElement('form');
       form.className = 'lab-cli__form';
+      // A shell `$`, not an `aws` label: this reads as a terminal, and the
+      // placeholder is what conveys that it runs aws commands.
       const prompt = document.createElement('span');
       prompt.className = 'lab-cli__prompt';
-      prompt.textContent = 'aws';
+      prompt.textContent = '$';
+      prompt.setAttribute('aria-hidden', 'true');
       const input = document.createElement('input');
       input.type = 'text';
       input.className = 'lab-cli__input';
-      input.setAttribute('aria-label', 'AWS CLI call');
-      input.placeholder = 'bedrock-agent-runtime retrieve --knowledge-base-id KB123456 …';
+      input.setAttribute('aria-label', 'Terminal command');
+      // A neutral, static placeholder. No value seeded from content, so the
+      // visitor composes the command themselves.
+      input.placeholder = 'aws <service> <operation> --flag value';
       form.appendChild(prompt);
       form.appendChild(input);
       form.addEventListener('submit', (ev) => {
         ev.preventDefault();
-        this.runCli(input.value);
+        this.runCommand(input.value);
       });
       cli.appendChild(form);
-    } else {
-      // A configuration step: Run checks the assembled artifact against the
-      // step's structural checks instead of executing it. No Pyodide, no CLI.
-      // This is the answer key — the visitor sees which required pieces are
-      // present and which forbidden ones leaked in.
-      const checkBtn = document.createElement('button');
-      checkBtn.type = 'button';
-      checkBtn.className = 'lab-run';
-      checkBtn.textContent = 'Check';
-      checkBtn.addEventListener('click', () => this.runChecks());
-      editor.appendChild(checkBtn);
+      this.cliInput = input;
+      if (this.cliOutput) {
+        this.cliOutput.textContent =
+          'Terminal: type an aws command and submit. botocore validates it ' +
+          'against the same sandbox the editor runs against.';
+      }
+    }
 
+    // Open the starting file; this sets the editor buffer and the action
+    // button label.
+    this.open(this.openPath);
+
+    // The runtime only exists for a runnable step. A pure configuration step
+    // grades its .ts file with the in-browser substring checks and never boots
+    // Pyodide, so it gets a Check hint rather than a loading message.
+    if (this.runnable) {
+      this.output.textContent = 'Loading the runtime…';
+      this.boot();
+    } else {
       this.output.textContent =
         'Configuration step: assemble the artifact from the snippets, then ' +
         'Check to verify it has what this decision requires.';
     }
+  }
 
-    this.files = new Map(this.data.files.map((f) => [f.path, f.body]));
-    this.open(this.openPath);
-    if (this.runnable) this.boot();
+  /** Build the editor (gutter + textarea + completion menu) inside a
+   *  container. Returns the created elements; the caller stores them and wires
+   *  the action button and Stop. */
+  buildCodeEditor(container) {
+    const wrap = document.createElement('div');
+    wrap.className = 'lab-editor__wrap';
+    const gutter = document.createElement('div');
+    gutter.className = 'lab-editor__gutter';
+    gutter.setAttribute('aria-hidden', 'true');
+    const textarea = document.createElement('textarea');
+    textarea.className = 'lab-editor__area';
+    textarea.spellcheck = false;
+    textarea.setAttribute('aria-label', 'Code editor');
+    textarea.setAttribute('role', 'combobox');
+    textarea.setAttribute('aria-autocomplete', 'list');
+    textarea.setAttribute('aria-expanded', 'false');
+    textarea.addEventListener('input', () => {
+      this.syncGutter();
+      this.requestCompletions();
+    });
+    textarea.addEventListener('scroll', () => {
+      gutter.scrollTop = textarea.scrollTop;
+      this.closeCompletions();
+    });
+    textarea.addEventListener('blur', () => {
+      setTimeout(() => this.closeCompletions(), 120);
+    });
+    textarea.addEventListener('keydown', (ev) => this.onEditorKey(ev));
+    wrap.appendChild(gutter);
+    wrap.appendChild(textarea);
+
+    const menu = document.createElement('ul');
+    menu.className = 'lab-complete';
+    menu.id = 'lab-complete';
+    menu.setAttribute('role', 'listbox');
+    menu.setAttribute('aria-label', 'Completions');
+    menu.hidden = true;
+    textarea.setAttribute('aria-controls', 'lab-complete');
+    wrap.appendChild(menu);
+
+    container.appendChild(wrap);
+    return { wrap, textarea, gutter, menu };
   }
 
   open(path) {
+    if (!this.textarea) return;
+
     // Save the current buffer only when switching away from a *different*
     // file. Guarding on the path change is what stops the first mount, where
     // openPath already equals path, from writing the empty textarea over the
     // seed before it has been loaded.
-    if (this.textarea && this.openPath && this.openPath !== path) {
+    if (this.openPath && this.openPath !== path) {
       this.files.set(this.openPath, this.textarea.value);
     }
     this.openPath = path;
@@ -261,9 +316,55 @@ class Workbench {
     for (const btn of this.root.querySelectorAll('.lab-file-list button')) {
       btn.setAttribute('aria-pressed', String(btn.textContent === path));
     }
+    this.updateAction(path);
+  }
+
+  /** Set the action button's label and enabled state from the open file's
+   *  extension, and hint the output pane at what the button will do. A .py
+   *  file runs against the intercept; a .ts file is checked against the answer
+   *  key. A file that is neither (NOTES.md) has no action, so the button is
+   *  disabled — the file is readable reference, not something to run. */
+  updateAction(path) {
+    if (!this.actionBtn) return;
+    if (this.isRunnablePath(path)) {
+      this.actionBtn.textContent = 'Run';
+      this.actionBtn.disabled = !this.runnable;
+      if (!this.runnable) {
+        // A .py file on a non-runnable step cannot run — there is no
+        // intercept. In practice a config step seeds no .py, so this is a
+        // guard rather than a path a visitor reaches.
+        this.actionBtn.title = 'This step runs no live call.';
+      } else {
+        this.actionBtn.removeAttribute('title');
+      }
+    } else if (this.isCheckPath(path)) {
+      this.actionBtn.textContent = 'Check';
+      this.actionBtn.disabled = false;
+      this.actionBtn.removeAttribute('title');
+    } else {
+      // Reference file (notes, data). Nothing to Run or Check.
+      this.actionBtn.textContent = this.runnable ? 'Run' : 'Check';
+      this.actionBtn.disabled = true;
+      this.actionBtn.title = 'This file is reference only.';
+    }
+  }
+
+  /** The action button. Dispatches on the open file's extension: Run a .py
+   *  buffer against the intercept, Check a .ts buffer against the answer key.
+   *  A file that is neither has a disabled button and never reaches here. */
+  action() {
+    const path = this.openPath;
+    if (this.isRunnablePath(path)) {
+      this.run();
+    } else if (this.isCheckPath(path)) {
+      // Persist the buffer first so the check grades exactly what is shown.
+      this.files.set(path, this.textarea.value);
+      this.runChecks(this.textarea.value, this.checks, this.output);
+    }
   }
 
   syncGutter() {
+    if (!this.textarea || !this.gutter) return;
     const lines = this.textarea.value.split('\n').length;
     let out = '';
     for (let i = 1; i <= lines; i++) out += i + '\n';
@@ -529,7 +630,11 @@ class Workbench {
       this.ready = true;
       this.output.textContent = 'Ready. Edit a file and Run it.';
     } else if (m.kind === 'output') {
-      this.showOutput(m);
+      if (this.pendingRunPane === 'terminal') {
+        this.finishCommand(m);
+      } else {
+        this.showOutput(m);
+      }
       this.running(false);
     } else if (m.kind === 'traceback') {
       this.pendingTraceback = m.text;
@@ -553,8 +658,48 @@ class Workbench {
     this.output.textContent = parts.join('\n') || '(no output)';
   }
 
+  /** The reply to a terminal submit. There is no authored answer key here:
+   *  botocore's own acceptance or rejection is the whole verification. A
+   *  traceback means the library rejected the command — a wrong operation, a
+   *  missing required parameter, the wrong client — which is a real error the
+   *  visitor should see and fix. A clean reply means botocore accepted and
+   *  serialized the call and the intercept returned the step's response, which
+   *  is printed as-is. Either way the output is the result, with no pass/fail
+   *  layered on top. */
+  finishCommand(m) {
+    const out = this.cliOutput;
+    if (!out) return;
+    if (this.pendingTraceback) {
+      const tb = this.pendingTraceback;
+      this.pendingTraceback = null;
+      out.textContent =
+        '\u2717 The command was rejected before it ran. botocore validated it ' +
+        'against the real client and raised:\n\n' +
+        tb +
+        '\n\nFix the command and submit again.';
+      return;
+    }
+    this.showCommandOutput(m);
+  }
+
+  /** The terminal's own output. Like `showOutput`, but writes the terminal
+   *  pane rather than the editor's, so a command never clobbers a Run or
+   *  Check result above it. */
+  showCommandOutput(m) {
+    const out = this.cliOutput;
+    if (!out) return;
+    const parts = [];
+    if (m.stdout) parts.push(m.stdout);
+    if (m.stderr) parts.push(m.stderr);
+    out.textContent = parts.join('\n') || '(no output)';
+  }
+
   run() {
     if (!this.ready) return;
+    // An editor Run routes its result to the editor output, even if the
+    // previous action was a terminal command that left the pane pointer on
+    // 'terminal'.
+    this.pendingRunPane = 'editor';
     // Persist the buffer to the worker's filesystem, then run it.
     this.files.set(this.openPath, this.textarea.value);
     this.worker.postMessage({ kind: 'write', path: this.openPath, body: this.textarea.value });
@@ -563,16 +708,17 @@ class Workbench {
     this.output.textContent = 'Running…';
   }
 
-  /** Check a configuration step's assembled artifact against its structural
-   *  checks. No runtime: each check is a substring that must be present or
-   *  absent in what the visitor typed, with the decision it verifies. The
-   *  absence checks are the ones that catch a left-in mistake — a wildcard
-   *  IAM, a fine-tune job — that a 'does it contain' test alone would miss. */
-  runChecks() {
-    const text = this.textarea.value;
+  /** Check a .ts buffer against the step's structural checks. No runtime: each
+   *  check is a substring that must be present or absent in what the visitor
+   *  typed, with the decision it verifies. The absence checks are the ones
+   *  that catch a left-in mistake — a wildcard IAM, a fine-tune job — that a
+   *  'does it contain' test alone would miss. */
+  runChecks(text, checks, out, opts) {
+    if (out == null || typeof text !== 'string') return;
+    checks = checks || [];
     const lines = [];
     let allPassed = true;
-    for (const check of this.checks) {
+    for (const check of checks) {
       const found = text.includes(check.pattern);
       const passed = check.present ? found : !found;
       if (!passed) allPassed = false;
@@ -581,23 +727,42 @@ class Workbench {
     const header = allPassed
       ? 'All checks passed. The artifact has what this decision requires.'
       : 'Some checks did not pass. Read the \u2717 lines and adjust the artifact.';
-    this.output.textContent = header + '\n\n' + lines.join('\n');
+    const preamble = opts && opts.preamble ? opts.preamble + '\n\n' : '';
+    out.textContent = preamble + header + '\n\n' + lines.join('\n');
   }
 
-  runCli(line) {
-    if (!this.ready || !line.trim()) return;
-    // The shim lives in Python so it shares the intercepted client. Translate
-    // argv to a boto3 call and run it as a transient snippet.
-    const src = cliToPython(line);
-    if (!src) {
-      this.output.textContent =
-        "Could not read that call. Expected: aws <service> <operation> --flag value";
+  /** Run a terminal command. An `aws` command is translated by the shim and
+   *  run against the same intercept the editor uses, so botocore validates it
+   *  for real; its output is the verification, with no authored answer key. A
+   *  command the shim cannot translate — a `cdk` line, or anything `cliToPython`
+   *  returns null for — is not runnable here, so it prints a plain message
+   *  rather than failing silently. The result lands in the terminal output
+   *  pane, never the editor output. */
+  runCommand(line) {
+    if (!this.ready) return;
+    const out = this.cliOutput;
+    if (!out) return;
+    if (!line.trim()) {
+      out.textContent = 'Type a command, then submit.';
       return;
     }
+    // Only aws commands execute here. The shim strips a leading `aws` and
+    // translates argv to a boto3 call; a null means it is not an aws command
+    // we can run (a cdk line, or malformed argv). cdk in particular has no
+    // cloud to deploy to, so say so rather than throwing or ignoring it.
+    const src = cliToPython(line);
+    if (!src) {
+      out.textContent =
+        'This terminal runs aws commands against the sandbox (botocore ' +
+        'validates them). cdk commands can\u2019t execute here \u2014 there ' +
+        'is no cloud to deploy to.';
+      return;
+    }
+    this.pendingRunPane = 'terminal';
     this.worker.postMessage({ kind: 'write', path: '__cli__.py', body: src });
     this.worker.postMessage({ kind: 'run', path: '__cli__.py' });
     this.running(true);
-    this.output.textContent = 'Running…';
+    out.textContent = 'Running the command against the sandbox\u2026';
   }
 
   running(on) {
@@ -621,10 +786,22 @@ class Workbench {
 // shape of the call, not the CLI's own parser. An unrecognised flag is
 // reported, never dropped, because silently ignoring an argument is how a
 // visitor concludes a wrong call was right.
+//
+// Returns null for anything that is not an aws command the sandbox can run:
+// a `cdk` line (no cloud to deploy to), a bare verb that is clearly another
+// tool, or argv too short or malformed to be a service call. The terminal
+// turns a null into a plain message rather than a fake success.
 
 function cliToPython(line) {
   const tokens = line.trim().split(/\s+/);
-  if (tokens[0] === 'aws') tokens.shift();
+  // A leading `aws` is the explicit form and is stripped. A leading verb that
+  // names a different tool (notably `cdk`) is not runnable here, so reject it
+  // rather than translating `cdk deploy` into a nonsense boto3 call.
+  if (tokens[0] === 'aws') {
+    tokens.shift();
+  } else if (tokens[0] === 'cdk') {
+    return null;
+  }
   if (tokens.length < 2) return null;
 
   const service = tokens[0];

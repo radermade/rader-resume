@@ -1,0 +1,277 @@
+{
+  "schemaVersion": 1,
+  "id": "case-graph",
+  "name": "Case graph",
+  "summary": "An investigations unit where a matter is a set of relationships, not a pile of similar PDFs, and the report must defend every edge it asserts.",
+  "brief": {
+    "whoIsAsking": "An investigator in a unit that records parties, filings, and citations as edges, asking 'which filings did this person sign, and which of those cite the statute named in the referral.'",
+    "whatTheyNeedBack": "The signer, the filing, and the statute edge, with the sentence quoted from the filing text — the node ids are not enough, the report needs the quote.",
+    "systemsAlreadyRunning": "The unit already records parties, filings, and citations as a graph of edges. The text of each filing is stored beside its node. Matters are kept strictly separate.",
+    "breaksWhen": "The report asserts a relationship the graph cannot defend. An investigator caught claiming an edge that is not there loses the matter, not just the answer.",
+    "doneMeans": "The answer names the signer, the filing, and the statute edge, quotes the sentence from the filing text, and does not include a similar-sounding filing from another matter."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "investigator", "label": "Investigator", "flowsTo": ["gateway"] },
+          { "id": "gateway", "label": "API Gateway", "icon": "api-gateway", "group": "acct", "flowsTo": ["lambda"] },
+          { "id": "lambda", "label": "AWS Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["graph", "bedrock"] },
+          { "id": "role", "label": "IAM role", "icon": "iam", "group": "acct" },
+          { "id": "graph", "label": "Neptune Analytics", "group": "acct", "flowsTo": ["chunks"] },
+          { "id": "chunks", "label": "Amazon S3 (filing text)", "icon": "s3", "group": "acct" },
+          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A graph store, not a vector store",
+      "decision": "Whether retrieval is a similarity search over filing text, or a walk over the relationships the unit already records.",
+      "why": "The question is 'which filings did this person sign, and which cite the statute in the referral.' A vector store answers 'which filings sound like the referral' — it returns other filings that resemble the text and misses the person who signed a filing that reads nothing like the question. Neptune Analytics walks the edges the unit already keeps: party signs filing, filing cites statute. The edge is the retrieval; similarity cannot answer who signed what. A vector store is the losing choice because the relationship, not the resemblance, is the question — and asserting a relationship the store cannot defend is the Breaks when. Configuration: the lesson is the graph as the retrieval surface.",
+      "snippets": [
+        {
+          "label": "A Neptune Analytics graph as the retrieval store. Edges are the data: party, filing, citation.",
+          "language": "typescript",
+          "source": "const graph = new CfnGraph(this, 'CaseGraph', {\n  graphName: 'case-graph',\n  provisionedMemory: 16,\n  publicConnectivity: false,\n  vectorSearchConfiguration: { dimension: 1024 },\n});"
+        }
+      ],
+      "infrastructure": "// Neptune Analytics is the retrieval store because the question is a\n// relationship, not a resemblance. 'Which filings did this person sign' is a\n// walk over edges; a vector store ranks similar text and cannot answer it.\n// publicConnectivity is off — the graph is reached from the VPC Lambda only.\nconst graph = new CfnGraph(this, 'CaseGraph', {\n  graphName: 'case-graph',\n  provisionedMemory: 16,\n  publicConnectivity: false,\n});",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the graph store from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: Neptune Analytics as the retrieval surface, private, because\n// the question is who-signed-what, not what-sounds-similar.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "A vector store is the losing choice here and it is worth being precise\nabout why: it is not that similarity is inaccurate, it is that it answers a\ndifferent question. 'Who signed this filing' has no similarity signal — the\nsigner's name is a node, reached by an edge, not a nearby point in an\nembedding space. The graph is the retrieval path; the vectors (step 6) only\never rank candidates the walk already produced.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnGraph",
+            "present": true,
+            "message": "A Neptune Analytics graph is the retrieval store. The edges are the data, so a walk answers who-signed-what, which a similarity search cannot."
+          },
+          {
+            "pattern": "publicConnectivity: false",
+            "present": true,
+            "message": "The graph is private, reached from the VPC Lambda only. A case graph is not a public endpoint."
+          },
+          {
+            "pattern": "OpenSearchServerless",
+            "present": false,
+            "message": "No vector-only store standing in for the graph. A vector store ranks similar filings and cannot answer which party signed which filing — the question this unit actually asks."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Walk the edges, quote the text",
+      "decision": "How the graph walk and the filing text come together, so the answer has both the relationship and the sentence.",
+      "why": "The edge finds the filing; the chunk supplies the sentence the report quotes. A node id is not a report — 'filing F-204 cites statute S-11' is an assertion the investigator still has to back with the words on the page. So the walk returns the filing nodes, and the filing text stored beside each node supplies the quote. This is a runnable step: the query against the graph returns the signer, the filing, and the statute edge, and the retrieved text is the sentence. The losing shape is a text-only retrieval that quotes a sentence with no edge behind it — a quote with no defensible relationship, which is the Breaks when wearing the other face.",
+      "snippets": [
+        {
+          "label": "The Neptune Analytics data-plane client. The query runs openCypher over the graph.",
+          "language": "python",
+          "source": "import boto3\n\ngraph = boto3.client(\"neptune-graph\", region_name=\"eu-central-1\")\n\nGRAPH_ID = \"g-caseGraph01\"\nPERSON = \"p-北-Nordheim\"  # the person named in the referral"
+        },
+        {
+          "label": "Walk party -> filing -> statute, returning the signer, the filing, and the edge. The text chunk beside each filing node is the quote.",
+          "language": "python",
+          "source": "q = (\n    \"MATCH (p:Party {id: $pid})-[:SIGNED]->(f:Filing)-[:CITES]->(s:Statute) \"\n    \"RETURN p.name AS signer, f.id AS filing, s.id AS statute, f.text AS quote\"\n)\nout = graph.execute_query(\n    graphIdentifier=GRAPH_ID,\n    queryString=q,\n    parameters={\"pid\": PERSON},\n    language=\"OPEN_CYPHER\",\n)\nfor row in out[\"results\"]:\n    print(row[\"signer\"], row[\"filing\"], row[\"statute\"])\n    print(row[\"quote\"])"
+        },
+        {
+          "label": "From the terminal, confirm the graph is available before you query it — get-graph shows its status. A query against a graph still in CREATING fails for a reason that has nothing to do with your Cypher.",
+          "language": "shell",
+          "source": "aws neptune-graph get-graph --graph-identifier g-caseGraph01"
+        }
+      ],
+      "infrastructure": "// The walk returns the relationship; the filing text stored beside each\n// node returns the quote. A text-only retrieval would give a sentence with\n// no edge behind it — a quote the investigator cannot defend as a\n// relationship. The edge and the chunk are retrieved together.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the graph walk from the snippets on the left, then Run. The\n# intercept returns the signer, the filing, the statute edge, and the\n# quoted sentence.\n#\n# The goal: a result that carries both the relationship (the edge) and the\n# sentence (the text beside the node), because the report needs both.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "execute_query is on the neptune-graph data plane; get-graph and the\ncreate/update calls are on the same client but are control-plane shapes.\nThe quote lives in f.text here for the lesson; in a real build the text is\na chunk in S3 keyed by the filing id, retrieved alongside the walk. Either\nway the point holds: the edge is the retrieval, the text is the evidence,\nand neither alone is the answer.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "neptune-graph",
+            "operation": "ExecuteQuery",
+            "body": {
+              "results": [
+                {
+                  "signer": "A. Nordheim",
+                  "filing": "F-204",
+                  "statute": "S-11",
+                  "quote": "The undersigned, A. Nordheim, affirms the filing pursuant to Statute S-11."
+                }
+              ]
+            }
+          },
+          {
+            "service": "neptune-graph",
+            "operation": "GetGraph",
+            "body": {
+              "id": "g-caseGraph01",
+              "name": "case-graph",
+              "status": "AVAILABLE",
+              "provisionedMemory": 16,
+              "publicConnectivity": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The matter id filters before the walk returns text",
+      "decision": "How a filing from another matter that shares a party name is kept out, and whether that filter runs before or after the walk returns text.",
+      "why": "Two matters can name the same party — a common surname, a shared corporate entity. A walk that returns every filing signed by 'A. Nordheim' pulls in a filing from an unrelated matter, and quoting it is the cross-matter leak that loses the case. The matter id is a filter on the walk, applied before the text comes back, not a hope that the names differ. A shared party name is not a shared matter. Configuration: the lesson is the matter-scoped query. The losing choice is filtering in application code after the walk — by then the other matter's text is already in hand and one slip quotes it.",
+      "snippets": [
+        {
+          "label": "The matter id is bound into the pattern, so the walk never leaves the matter. Not an after-the-fact filter in Python.",
+          "language": "typescript",
+          "source": "const scopedQuery =\n  'MATCH (p:Party {id: $pid})-[:SIGNED]->(f:Filing {matter: $matter}) ' +\n  '-[:CITES]->(s:Statute) ' +\n  'RETURN p.name AS signer, f.id AS filing, s.id AS statute, f.text AS quote';\n// $matter is bound from the investigator's open matter, server-side."
+        }
+      ],
+      "infrastructure": "// The matter id constrains the pattern itself: a Filing node only matches\n// when its matter attribute equals the open matter. The filter is in the\n// walk, not in application code after it — by the time a post-walk filter\n// runs, the other matter's text is already in memory and one slip quotes\n// it. A shared party name is not a shared matter.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the matter-scoped query from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the matter id is bound into the graph pattern, so a filing from\n// another matter with the same party name never comes back.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is the Breaks when made concrete: an asserted edge the graph cannot\ndefend is often an edge from the wrong matter. 'Filter before the walk\nreturns text' is the same discipline as 'filter before similarity' in a\nvector RAG — the untrusted thing (another matter's text) must never enter\nthe context, not be removed from it later. Binding $matter server-side also\nkeeps it out of reach of a prompt-injected instruction to 'widen the\nsearch.'\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "matter: $matter",
+            "present": true,
+            "message": "The matter id is bound into the Filing pattern, so the walk is scoped to the open matter before any text is returned."
+          },
+          {
+            "pattern": "RETURN p.name AS signer",
+            "present": true,
+            "message": "The walk still returns the signer, the filing, and the edge — the relationship the report defends — now within one matter only."
+          },
+          {
+            "pattern": "filter(",
+            "present": false,
+            "message": "No after-the-fact filter in application code. By the time a post-walk filter runs, the other matter's text is already in hand and one slip quotes it."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Citations name the node and the file",
+      "decision": "What a citation in the report points at — the filing text alone, or the node and the edge that make the relationship defensible.",
+      "why": "A file citation without the relationship hides the path the investigator has to defend. 'See F-204' tells a reviewer which document, but not that F-204 was signed by this party and cites this statute — which is the actual claim. So a citation names the node (the filing), the edge (signed, cites), and the source file for the quote. The report's assertion and its support are the same object. Configuration: the lesson is the citation shape that carries the edge. The losing choice is a citation that is only a page reference, because it leaves the relationship asserted but unsupported — the Breaks when exactly.",
+      "snippets": [
+        {
+          "label": "A citation that carries the node, the edge, and the file — not only a page reference.",
+          "language": "typescript",
+          "source": "interface Citation {\n  node: string;      // f-204\n  edge: string;      // SIGNED_BY -> p-nordheim; CITES -> s-11\n  sourceFile: string; // s3://case-corpus/F-204.pdf\n  quote: string;\n}"
+        }
+      ],
+      "infrastructure": "// The citation is the relationship plus the evidence: the node, the edge\n// that connects it, and the file the quote came from. A page-reference-only\n// citation leaves the asserted edge unsupported, which is the one failure\n// that ends the matter.",
+      "workbench": {
+        "open": "citation.ts",
+        "files": [
+          {
+            "path": "citation.ts",
+            "body": "// Assemble the citation shape from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: a citation that names the node and the edge, so the\n// relationship the report asserts is the relationship the citation proves.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "In a vector RAG the citation is a file and a span. Here it has to carry the\nedge too, because the claim is relational: not 'this sentence exists' but\n'this party signed this filing which cites this statute.' A reviewer checks\nthe edge, not just the quote. This is why the graph retrieval and the\ncitation shape are one decision, not two.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "edge: string",
+            "present": true,
+            "message": "The citation carries the edge, so the relationship the report asserts is the relationship the citation proves."
+          },
+          {
+            "pattern": "sourceFile: string",
+            "present": true,
+            "message": "The citation names the source file for the quote, so the sentence is checkable against the document it came from."
+          },
+          {
+            "pattern": "node: string",
+            "present": true,
+            "message": "The citation names the node (the filing), tying the quote to the graph object the edge connects."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Rebuild the vectors when the model changes",
+      "decision": "What happens to the graph's vector index when the embedding model changes — a query against the mix, or a rebuild first.",
+      "why": "Neptune Analytics can hold vectors beside the nodes to rank candidates the walk produces. Those vectors are written by an embedding model, in that model's space. Change the model and the old vectors are a different space: querying a mix of two spaces makes 'nearest' meaningless, and the top hit is noise wearing a confidence score. The rebuild is part of the model change, not a later cleanup. This is a diagnosis step — the sandbox cannot show a silently-wrong nearest-neighbour result, so the lesson is the order: rebuild the vectors, then query. The losing move is treating the embedding model as a swappable setting, the way you would a prompt.",
+      "snippets": [
+        {
+          "label": "The rule, as the order you follow when the embedding model changes. The mix is the trap.",
+          "language": "python",
+          "source": "# Changing the embedding model is a rebuild, not a setting:\n# 1. The old vectors were written in the old model's space.\n# 2. New query vectors come from the new model's space.\n# 3. Nearest across two spaces is meaningless — the top hit is noise.\n# 4. Re-embed every node, replace the index, THEN query.\n# The graph edges are unaffected; only the vector index is rebuilt.\nEMBED_MODEL = \"amazon.titan-embed-text-v2:0\"  # change = rebuild"
+        }
+      ],
+      "infrastructure": "// Nothing new to provision. The embedding model behind the graph's vector\n// index is not a swappable setting: a change means re-embedding every node\n// and replacing the index before the next query. The edges are untouched;\n// the vectors are a different space after the swap.",
+      "workbench": {
+        "open": "diagnosis.md",
+        "files": [
+          {
+            "path": "diagnosis.md",
+            "body": "# The embedding model changed\n\nAssemble the rebuild order from the snippet on the left. This is a diagnosis\nstep: the sandbox cannot reproduce a silently-wrong nearest-neighbour\nresult, so the lesson is the order you follow, not a call to Run.\n\nThe seeded symptom: after a model swap, ranking returns confident nonsense —\nthe edges still walk correctly, but the vector scores are meaningless.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Same failure as the policy assistant's embedding-dimension step, from the\nother direction: there a width mismatch failed ingestion loudly; here a\nspace mismatch fails ranking silently, which is worse because nothing\nerrors. The graph is the safety rail — the walk is still correct, so a\nmatter does not collapse on a bad vector index, it just ranks candidates\nbadly until the rebuild. That is the argument for graph-first retrieval one\nmore time.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "rebuild, not a setting",
+            "present": true,
+            "message": "Changing the embedding model is a rebuild, not a swappable setting. The old and new vectors are different spaces."
+          },
+          {
+            "pattern": "Re-embed every node",
+            "present": true,
+            "message": "The fix is to re-embed every node and replace the index before querying — not to query across a mix of two spaces."
+          },
+          {
+            "pattern": "edges are unaffected",
+            "present": true,
+            "message": "The graph edges are untouched by the model change; only the vector index rebuilds. The walk stays correct, which is why graph-first retrieval is the safety rail."
+          }
+        ]
+      }
+    }
+  ]
+}

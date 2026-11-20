@@ -1,0 +1,580 @@
+{
+  "schemaVersion": 1,
+  "id": "brand-voice",
+  "name": "Brand voice",
+  "summary": "Product copy fine-tuned to sound like the brand, with this week's price and stock kept in retrieval, so a stale price in the brand's voice never ships.",
+  "brief": {
+    "whoIsAsking": "A retailer whose product copy must sound like the brand — short, specific, none of the hype words the style guide bans — where prompting holds the voice for a week and then drifts.",
+    "whatTheyNeedBack": "Copy in the brand voice with current facts: the voice from trained weights, the price and stock from retrieval, so the copy is never confidently wrong about a number.",
+    "systemsAlreadyRunning": "A few thousand approved before-and-after pairs from the copy desk. The voice is stable; the facts (price, stock) change constantly and already live somewhere retrievable.",
+    "breaksWhen": "The copy states a stale price in the brand's voice. The voice is what was trained, so a fact trained in beside it is the one mistake another training run cannot quickly undo.",
+    "doneMeans": "New copy passes the voice eval, a bad version rolls back by alias, and a price change never requires a training job."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "copy", "label": "Copy request", "flowsTo": ["model"] },
+          { "id": "model", "label": "Fine-tuned model (voice)", "icon": "bedrock", "group": "acct", "flowsTo": ["facts"] },
+          { "id": "facts", "label": "Knowledge base (price, stock)", "icon": "bedrock", "group": "acct", "flowsTo": ["catalog"] },
+          { "id": "catalog", "label": "Amazon S3 (catalog facts)", "icon": "s3", "group": "acct" },
+          { "id": "registry", "label": "SageMaker Model Registry", "group": "acct" },
+          { "id": "training", "label": "Fine-tune (JumpStart)", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Fine-tune on the labeled pairs",
+      "decision": "Whether to keep prompting for the voice or fine-tune on the copy desk's labeled pairs.",
+      "why": "Prompting holds the brand voice for a week and then drifts — a long style prompt is instruction the model follows loosely and forgets under pressure. The copy desk has a few thousand approved before-and-after pairs, which is a training set for the behavior 'sound like us.' Fine-tuning on those pairs bakes the voice into the weights, where it is stable rather than re-asserted every prompt. Fine-tuning is the right tool when the behavior itself is what you need to change. Configuration: the lesson is fine-tune-for-behavior on the labeled pairs. The losing choice is more prompt engineering, which has already failed to hold the voice and will keep drifting.",
+      "snippets": [
+        {
+          "label": "A fine-tuning job on the labeled before-and-after pairs. The voice goes into the weights.",
+          "language": "typescript",
+          "source": "const tune = new CfnModelCustomizationJob(this, 'VoiceTune', {\n  customizationType: 'FINE_TUNING',\n  baseModelIdentifier: baseModelArn,\n  trainingDataConfig: { s3Uri: 's3://brand-voice/pairs/train.jsonl' },\n  outputDataConfig: { s3Uri: 's3://brand-voice/model/' },\n});"
+        }
+      ],
+      "infrastructure": "// Fine-tuning on the copy desk's labeled pairs bakes the voice into the weights, where it is stable. Prompting re-asserts the voice every call and drifts within a week. Fine-tuning is for changing the behavior itself — 'sound like us' — which is exactly what a few thousand approved pairs teach.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the fine-tuning job from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the brand voice is trained into the weights from the labeled\n// pairs, not re-asserted by a prompt that drifts.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Fine-tuning changes behavior, and voice is behavior. The pairs are\nsupervised examples of input-to-branded-output, which is exactly what a\nfine-tune consumes. The decision tree for customization starts here: full\nfine-tune for a behavior change (this step), continued pre-training for\nmissing vocabulary (next), LoRA when the change is small (after that). The\nfacts stay out of training entirely — that is the whole retrieval thread.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "customizationType: 'FINE_TUNING'",
+            "present": true,
+            "message": "A fine-tuning job bakes the voice into the weights — the right tool when the behavior itself is what must change."
+          },
+          {
+            "pattern": "train.jsonl",
+            "present": true,
+            "message": "The labeled before-and-after pairs are the training set, the copy desk's approved examples of the voice."
+          },
+          {
+            "pattern": "promptTemplate",
+            "present": false,
+            "message": "No reliance on a prompt template for the voice. Prompting already drifts within a week; the voice goes into the weights instead."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Continued pre-training only for vocabulary",
+      "decision": "Whether continued pre-training is needed, or fine-tuning on the pairs is the right customization.",
+      "why": "Continued pre-training teaches a base model vocabulary and domain it has never seen — a corpus of unlabeled text in a specialized field. It does not teach 'sound like us': voice is a behavior learned from labeled examples, not a vocabulary gap. The brand's words are ordinary English arranged in a house style, so there is no missing vocabulary to pre-train. Reaching for continued pre-training here is using the heaviest, most data-hungry customization for a job fine-tuning does directly. Configuration: the lesson is continued-pre-training-for-vocabulary, not for voice. The losing choice is continued pre-training on the pairs, which is both the wrong mechanism and far more data and cost than the behavior change needs.",
+      "snippets": [
+        {
+          "label": "The decision recorded: fine-tuning for the voice, not continued pre-training. CPT is for missing vocabulary.",
+          "language": "typescript",
+          "source": "const customization = {\n  chosen: 'FINE_TUNING', // voice is a behavior from labeled pairs\n  // CONTINUED_PRE_TRAINING is for vocabulary/domain the base model never\n  // saw — unlabeled corpus. The brand's words are ordinary English in a\n  // house style, so there is no vocabulary gap to pre-train.\n};"
+        }
+      ],
+      "infrastructure": "// Continued pre-training teaches a base model vocabulary and domain it never saw, from an unlabeled corpus. Voice is a behavior learned from labeled pairs, not a vocabulary gap — the brand's words are ordinary English in a house style. CPT here is the heaviest, most data-hungry customization for a job fine-tuning does directly.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the customization decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: fine-tuning for the voice, with continued pre-training\n// recognized as the tool for missing vocabulary, not for 'sound like us.'\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The customization types are not a difficulty ladder you climb; they fit\ndifferent gaps. Continued pre-training: the model lacks domain vocabulary\n(legal, medical, a new field) — fed an unlabeled corpus. Fine-tuning: the\nmodel's behavior is wrong — fed labeled examples. Voice is behavior, and\nthe pairs are labeled, so fine-tuning. Choosing CPT for voice is a category\nerror that also costs far more data and compute.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "chosen: 'FINE_TUNING'",
+            "present": true,
+            "message": "Fine-tuning is chosen for the voice — a behavior learned from the labeled pairs."
+          },
+          {
+            "pattern": "vocabulary gap to pre-train",
+            "present": true,
+            "message": "The reasoning is recorded: there is no missing vocabulary, so continued pre-training does not apply."
+          },
+          {
+            "pattern": "chosen: 'CONTINUED_PRE_TRAINING'",
+            "present": false,
+            "message": "Continued pre-training is not chosen. It is for domain vocabulary the base model never saw, not for teaching a house style."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "LoRA when the change is a known, small size",
+      "decision": "Whether the voice change needs a full fine-tune or a parameter-efficient LoRA adaptation.",
+      "why": "A full fine-tune updates all the weights — powerful, expensive, and justified when the behavior change is large and pervasive. The copy desk's change is a bounded style shift of known size: branded phrasing over a base model that already writes fluent English. LoRA (low-rank adaptation) learns a small set of adapter weights for exactly that kind of targeted change, at a fraction of the compute and with an artifact you can swap. You price the change by its size, and this one is LoRA-shaped. Configuration: the lesson is LoRA for a small, known behavior shift. The losing choice is a full fine-tune for a style adjustment, paying full-training cost for a change a lightweight adapter captures.",
+      "snippets": [
+        {
+          "label": "LoRA adaptation for the bounded voice shift — a small adapter over the base model, not a full retrain.",
+          "language": "typescript",
+          "source": "const tune = {\n  method: 'LORA', // parameter-efficient; a small adapter for a known-size shift\n  hyperparameters: { loraRank: 8, epochs: 3 },\n  // A full fine-tune updates all weights — justified for a large behavior\n  // change, not a bounded style adjustment.\n};"
+        }
+      ],
+      "infrastructure": "// LoRA learns a small adapter for a bounded, known-size behavior shift — branded phrasing over a base model that already writes fluent English — at a fraction of a full fine-tune's compute. A full fine-tune updates all the weights and is justified for a large, pervasive change. You price the change by its size, and a style shift is LoRA-shaped.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the LoRA tuning config from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: LoRA for a bounded, known-size voice shift, rather than a full\n// fine-tune priced for a large behavior change.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "LoRA vs full fine-tune is a cost-to-change-size match. LoRA freezes the\nbase weights and learns a small low-rank adapter, so it is cheap, fast, and\nproduces a swappable artifact. A full fine-tune rewrites all weights, which\nyou want only when the change is large and pervasive. A brand-voice shift\nover a competent base model is small and targeted — LoRA territory. The\nsame 'price the change by its size' judgment recurs across the\ncustomization decisions.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "method: 'LORA'",
+            "present": true,
+            "message": "LoRA learns a small adapter for the bounded voice shift, at a fraction of a full fine-tune's compute."
+          },
+          {
+            "pattern": "loraRank",
+            "present": true,
+            "message": "The LoRA rank is a hyperparameter of the adapter — a parameter-efficient method sized to a known, small change."
+          },
+          {
+            "pattern": "method: 'FULL'",
+            "present": false,
+            "message": "Not a full fine-tune. Updating all weights for a bounded style adjustment pays full-training cost a LoRA adapter captures."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "JumpStart as the starting checkpoint",
+      "decision": "Whether training starts from a pretrained checkpoint or an empty initialization.",
+      "why": "You are not training a language model from scratch — that is months of compute and a corpus you do not have. You are adapting a model that already writes fluent English to a house style. SageMaker JumpStart provides the pretrained checkpoint to start from: a base foundation model you fine-tune or LoRA-adapt. Starting from JumpStart means the training job begins with a competent model and teaches it the delta, the voice. Configuration: the lesson is JumpStart as the starting checkpoint. The losing choice is imagining this as training from an empty initialization, which misunderstands the job — the capability is already in the base model, and you are only adding the voice.",
+      "snippets": [
+        {
+          "label": "A JumpStart base model as the starting checkpoint for the fine-tune. Not an empty initialization.",
+          "language": "typescript",
+          "source": "const checkpoint = {\n  source: 'SAGEMAKER_JUMPSTART',\n  baseModel: 'meta-llama-3-8b-instruct', // a competent base, adapted to the voice\n  // Training starts from this checkpoint. You are not initializing weights\n  // from scratch.\n};"
+        }
+      ],
+      "infrastructure": "// SageMaker JumpStart provides the pretrained checkpoint the fine-tune starts from — a base model that already writes fluent English, adapted to the house style. You are not training from an empty initialization; the capability is in the base model and the job teaches only the voice delta.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the JumpStart checkpoint choice from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: training starts from a JumpStart base model, adapting a\n// competent model to the voice rather than initializing from scratch.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "JumpStart is the catalog of pretrained models and solution templates you\nstart from. The mental correction this step makes: fine-tuning is adapting\na checkpoint, not training a model. The base already knows language; the\njob adds the voice. This is why a few thousand pairs is enough — you are\nnudging a capable model, not building capability. Starting from scratch\nwould need orders of magnitude more data and compute for no benefit.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "SAGEMAKER_JUMPSTART",
+            "present": true,
+            "message": "Training starts from a JumpStart pretrained checkpoint — a competent base model adapted to the voice."
+          },
+          {
+            "pattern": "baseModel",
+            "present": true,
+            "message": "A named base model is the starting point; the fine-tune teaches the voice delta over it."
+          },
+          {
+            "pattern": "from scratch",
+            "present": true,
+            "message": "The note is explicit that this is not training from scratch — the capability is in the base model, only the voice is added."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Ground Truth for the labeled set",
+      "decision": "Whether the training set is the copy desk's labeled pairs, or a folder of documents treated as if it were training data.",
+      "why": "A fine-tune needs labeled examples — input and the desired branded output — and that is what the copy desk's approved before-and-after pairs are. SageMaker Ground Truth is the labeling workflow that produces and manages that labeled set: human labelers (here, the copy desk) producing the pairs that are the actual asset. A folder of PDFs or past copy is not a training set — unlabeled text has no target for the model to learn toward. This is the inverse of the clinical scenario, where Ground Truth was the wrong tool because that was not a training project; here it is exactly right because this is. Configuration: the lesson is Ground Truth producing the labeled pairs. The losing choice is pointing training at unlabeled documents, which has no supervision signal.",
+      "snippets": [
+        {
+          "label": "A Ground Truth labeling workflow producing the before-and-after pairs. The labeled pairs are the asset.",
+          "language": "typescript",
+          "source": "const labeling = new CfnLabelingJob(this, 'VoicePairs', {\n  humanTaskConfig: { workteamArn: copyDeskArn, taskUiArn: pairReviewUiArn },\n  outputConfig: { s3OutputPath: 's3://brand-voice/pairs/' },\n  // Output: labeled input -> branded-output pairs. The training asset.\n});"
+        }
+      ],
+      "infrastructure": "// SageMaker Ground Truth is the labeling workflow that produces the before-and-after pairs — the copy desk labeling input-to-branded-output, which is the training asset. A folder of PDFs or past copy is unlabeled: it has no target for the model to learn toward, so it is not a training set. The pairs are what supervision needs.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Ground Truth labeling job from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the labeled before-and-after pairs are produced and managed by\n// Ground Truth — the asset the fine-tune trains on.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Ground Truth is the labeling path, and here that is exactly the job —\nunlike the clinical scenario, where it was the wrong tool because that was\nnot a training project. The distinction is whether you are building a\ntraining dataset. Fine-tuning needs labeled pairs; Ground Truth produces\nand manages them with a human workteam (the copy desk). A pile of unlabeled\ndocuments is not a substitute — supervision needs the target output, which\nis what the pair provides.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnLabelingJob",
+            "present": true,
+            "message": "A Ground Truth labeling job produces the before-and-after pairs — the supervised training asset."
+          },
+          {
+            "pattern": "workteamArn: copyDeskArn",
+            "present": true,
+            "message": "The copy desk is the workteam producing the labeled pairs, the approved examples of the voice."
+          },
+          {
+            "pattern": "a folder of PDFs",
+            "present": false,
+            "message": "The training set is labeled pairs, not unlabeled documents — a folder of PDFs has no target for supervision to learn toward."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Register, approve, canary, roll back by alias",
+      "decision": "Whether the trained weights are a release with a registry and a rollback, or a file someone copies.",
+      "why": "The weights are yours now, which means they need the discipline of a release: registered, approved, canaried, and rollback-able. SageMaker Model Registry versions the model and carries an approval status; a canary routes a slice of traffic to the new version before full rollout; and production points at an alias so rolling back is moving the alias to the previous version, not retraining. A weight file on a laptop is not a release — no version, no approval, no way back. Configuration: the lesson is the registry-approve-canary-alias lifecycle. The losing choice is deploying the trained artifact directly, which leaves no rollback when the new voice version is worse — and the Breaks when says a bad trained version is the one you cannot quickly undo.",
+      "snippets": [
+        {
+          "label": "The trained model registered and versioned, with an approval status and an alias production points at.",
+          "language": "typescript",
+          "source": "const pkg = new CfnModelPackage(this, 'VoiceModelV2', {\n  modelPackageGroupName: 'brand-voice',\n  modelApprovalStatus: 'PendingManualApproval',\n});\n// Production points at the 'live' alias; rollback moves the alias to the\n// previous approved version. A canary routes a slice first."
+        }
+      ],
+      "infrastructure": "// The trained weights are a release: SageMaker Model Registry versions them with an approval status, a canary routes a slice of traffic to the new version first, and production points at an alias so rollback is moving the alias — not retraining. A weight file on a laptop has no version, no approval, and no way back.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the model-package registration from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the trained model is registered, approved, canaried, and\n// rollback-able by alias — a release, not a file.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Owning the weights means owning a release process. Registry: versioned\nartifacts with lineage and approval. Canary: a slice of traffic validates\nthe new version in production before full rollout. Alias: production points\nat it, so rollback is instant and does not require retraining. The Breaks\nwhen makes this load-bearing — a bad trained version is the one mistake\nanother training run cannot quickly undo, so the fast path back is the\nalias, not the trainer.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnModelPackage",
+            "present": true,
+            "message": "The trained model is registered as a versioned package in the Model Registry — a release with lineage, not a loose file."
+          },
+          {
+            "pattern": "modelApprovalStatus",
+            "present": true,
+            "message": "The package carries an approval status, so a version is promoted deliberately rather than deployed on training completion."
+          },
+          {
+            "pattern": "rollback moves the alias",
+            "present": true,
+            "message": "Production points at an alias, so rollback is moving the alias to the previous approved version — the fast undo the Breaks when needs."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Custom models run on provisioned throughput",
+      "decision": "Whether a custom (fine-tuned) model hosted in Bedrock is invoked on-demand or on provisioned throughput.",
+      "why": "On-demand invocation is for the base foundation models Bedrock hosts for everyone. A custom model — your fine-tuned weights imported into Bedrock — does not run on on-demand; it requires provisioned throughput, dedicated capacity you buy for your custom weights. This is a hard constraint, not a cost preference: the custom model is not in the shared on-demand pool. You provision a model unit for it. Configuration: the lesson is custom-model-means-provisioned-throughput. The losing choice is assuming the fine-tuned model is invokable on-demand like the base, which fails because custom weights are not served from the shared capacity.",
+      "snippets": [
+        {
+          "label": "Provisioned throughput for the custom model. Custom weights are not served on-demand.",
+          "language": "typescript",
+          "source": "const pt = new CfnProvisionedModelThroughput(this, 'VoiceThroughput', {\n  modelId: customModelArn, // the fine-tuned model imported into Bedrock\n  modelUnits: 1,\n  provisionedModelName: 'brand-voice-pt',\n});\n// On-demand serves the base models only; a custom model needs this."
+        }
+      ],
+      "infrastructure": "// A custom (fine-tuned) model in Bedrock is invoked on provisioned throughput, not on-demand. On-demand serves the shared base models; custom weights are not in that pool, so you buy dedicated capacity — a model unit — for them. This is a constraint of custom models, not a cost choice.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the provisioned-throughput config from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the custom fine-tuned model is invoked on provisioned\n// throughput, because custom weights do not run on on-demand.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is a frequently-missed constraint: on-demand is for the base models\nBedrock hosts for everyone, and a custom model (your fine-tune) is not in\nthat pool. It requires provisioned throughput — a purchased model unit of\ndedicated capacity. The cost implication matters for the overall design:\ncustom weights carry an always-on capacity cost, which is part of why the\nvoice-vs-facts split keeps the facts in retrieval rather than training\nthem in and re-paying to host them.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnProvisionedModelThroughput",
+            "present": true,
+            "message": "The custom model is served on provisioned throughput — dedicated capacity, because custom weights are not in the on-demand pool."
+          },
+          {
+            "pattern": "modelUnits",
+            "present": true,
+            "message": "A model unit of dedicated capacity is provisioned for the custom weights, the unit provisioned throughput is bought in."
+          },
+          {
+            "pattern": "On-demand serves the base models only",
+            "present": true,
+            "message": "The note records the constraint: on-demand is for base models; a custom model needs provisioned throughput."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A SageMaker endpoint when Bedrock does not host",
+      "decision": "Whether to host the weights in Bedrock or on a SageMaker endpoint, and what signals the scale.",
+      "why": "If Bedrock does not host your model — an architecture or base it does not support as a custom import — you host it on a SageMaker endpoint: your own inference instance serving the weights. The scale signal for sizing it is GPU memory and in-flight tokens, not request count alone: a few requests each generating long outputs can saturate GPU memory, while many tiny requests may not. Sizing by request count misses the token-level load that actually fills the GPU. Configuration: the lesson is the SageMaker endpoint as the fallback host, sized by GPU/token load. The losing choice is assuming request-per-second is the capacity metric, which under-provisions for long-generation traffic and over-provisions for short.",
+      "snippets": [
+        {
+          "label": "A SageMaker endpoint hosting the weights Bedrock does not, sized by GPU memory and in-flight tokens.",
+          "language": "typescript",
+          "source": "const endpoint = new CfnEndpoint(this, 'VoiceEndpoint', {\n  endpointConfigName: voiceEndpointConfigName,\n  // instance type sized by GPU memory and concurrent in-flight tokens,\n  // not requests-per-second alone.\n});"
+        }
+      ],
+      "infrastructure": "// When Bedrock does not host the model, a SageMaker endpoint serves the weights on your own inference instance. Size it by GPU memory and in-flight tokens: a few long-generation requests can saturate GPU memory while many tiny ones do not. Request-count sizing misses the token-level load that actually fills the GPU.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the SageMaker endpoint from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: host the weights Bedrock does not, on a SageMaker endpoint\n// sized by GPU memory and in-flight tokens, not request count.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two hosting paths for custom weights: Bedrock (provisioned throughput, the\nprevious step) when Bedrock supports the model, and a SageMaker endpoint\nwhen it does not. The sizing lesson is the transferable one: LLM inference\nload is token-bound, not request-bound. In-flight tokens — concurrent\ngenerations times their length — fill GPU memory, so a request-per-second\nSLO can be met while the GPU is already saturated by a few long outputs.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnEndpoint",
+            "present": true,
+            "message": "A SageMaker endpoint hosts the weights when Bedrock does not — your own inference instance serving the custom model."
+          },
+          {
+            "pattern": "GPU memory and concurrent in-flight tokens",
+            "present": true,
+            "message": "The endpoint is sized by GPU memory and in-flight tokens, the load that actually fills the GPU."
+          },
+          {
+            "pattern": "not requests-per-second alone",
+            "present": true,
+            "message": "Request count alone is not the scale signal — it misses the token-level load of long generations."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Neo compiles a classic model, not a Bedrock call",
+      "decision": "Whether SageMaker Neo applies here, given it compiles classic models and does not touch a Bedrock invocation.",
+      "why": "SageMaker Neo compiles a trained classic ML model for a specific target — optimizing a model you deploy to an endpoint or an edge device for faster inference on that hardware. It operates on the model artifact. It has nothing to do with a Bedrock Converse call, which is a managed API invocation you do not compile. Reaching for Neo to 'speed up the Bedrock call' is a category error: there is no artifact of yours to compile in a managed API path. Configuration: the lesson is Neo's scope — classic model compilation, not Bedrock latency. The losing choice is adding Neo to the design to optimize a Bedrock invocation it cannot touch.",
+      "snippets": [
+        {
+          "label": "The scope note: Neo compiles a classic model artifact; it does not apply to a Bedrock invocation.",
+          "language": "typescript",
+          "source": "const neo = {\n  compiles: 'a classic model artifact for a target (endpoint or edge)',\n  doesNotApplyTo: 'a Bedrock Converse call — a managed API, no artifact to compile',\n};"
+        }
+      ],
+      "infrastructure": "// SageMaker Neo compiles a trained classic model for a target device or instance, optimizing inference on that hardware. It operates on a model artifact. A Bedrock Converse call is a managed API invocation with no artifact of yours to compile, so Neo does not apply — reaching for it to speed up a Bedrock call is a category error.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Neo scope note from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: record that Neo compiles a classic model artifact and does not\n// apply to a Bedrock invocation, so it is not added to speed one up.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Neo is a compilation/optimization tool for classic ML models deployed to\nSageMaker endpoints or edge targets — it rewrites the model for the\nhardware. The exam-relevant confusion is thinking any 'make inference\nfaster' tool applies to Bedrock. Bedrock is a managed API; you do not hold\nor compile the base model. Neo belongs to the classic-model deployment path\n(a self-hosted endpoint), not to a Converse call.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "compiles",
+            "present": true,
+            "message": "Neo compiles a classic model artifact for a target — its actual scope."
+          },
+          {
+            "pattern": "doesNotApplyTo",
+            "present": true,
+            "message": "The note records that Neo does not apply to a Bedrock Converse call — a managed API with no artifact to compile."
+          },
+          {
+            "pattern": "no artifact to compile",
+            "present": true,
+            "message": "There is no artifact of yours to compile in a managed Bedrock path, so Neo is not a way to speed up the call."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Model Monitor watches a classic endpoint",
+      "decision": "Whether SageMaker Model Monitor applies, given it watches a classic endpoint and not a Bedrock Converse call.",
+      "why": "SageMaker Model Monitor watches a deployed classic endpoint for data drift, model quality drift, and bias drift — it compares live inference data against a baseline and alarms when the distribution moves. It is bolted onto a SageMaker endpoint, with the endpoint's data capture feeding it. It is not a dashboard you attach to a Bedrock Converse call: a managed API invocation has no endpoint of yours to capture from. If the brand-voice model is on a SageMaker endpoint (the earlier fallback), Model Monitor fits; if it is a Bedrock custom model, drift is watched differently. Configuration: the lesson is Model Monitor's scope — a classic endpoint, not a Bedrock call. The losing choice is expecting Model Monitor to watch a Converse invocation it has no hook into.",
+      "snippets": [
+        {
+          "label": "Model Monitor on the SageMaker endpoint's captured data; not attachable to a Bedrock call.",
+          "language": "typescript",
+          "source": "const monitor = {\n  watches: 'a SageMaker endpoint via its data capture',\n  detects: ['data drift', 'model quality drift', 'bias drift'],\n  doesNotApplyTo: 'a Bedrock Converse call — no endpoint of yours to capture',\n};"
+        }
+      ],
+      "infrastructure": "// SageMaker Model Monitor watches a deployed classic endpoint for data, quality, and bias drift, fed by the endpoint's data capture. It attaches to a SageMaker endpoint, not a Bedrock Converse call — a managed API has no endpoint of yours to capture from. It fits only if the voice model is self-hosted on an endpoint.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Model Monitor scope note from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: record that Model Monitor watches a SageMaker endpoint via data\n// capture, and does not attach to a Bedrock Converse call.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Model Monitor pairs with the SageMaker endpoint path, not the Bedrock path,\nfor the same reason as Neo: it needs an endpoint of yours with data capture\nto observe. On a managed Bedrock call you watch quality with evals and\nCloudWatch metrics, not Model Monitor. The recurring lesson across Neo and\nMonitor: classic-ML operational tools attach to self-hosted endpoints, and\na managed API is a different operational surface.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "watches",
+            "present": true,
+            "message": "Model Monitor watches a SageMaker endpoint via its data capture — its actual scope."
+          },
+          {
+            "pattern": "data drift",
+            "present": true,
+            "message": "It detects data, quality, and bias drift against a baseline on a deployed classic endpoint."
+          },
+          {
+            "pattern": "no endpoint of yours to capture",
+            "present": true,
+            "message": "Model Monitor does not attach to a Bedrock Converse call — a managed API has no endpoint of yours to capture from."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "An EC2 GPU box only when the OS is the requirement",
+      "decision": "Whether a raw EC2 GPU instance is justified, or a managed training/hosting service covers the need.",
+      "why": "A raw EC2 GPU instance means you own the OS, the drivers, the CUDA stack, and the patching. That is justified only when the OS itself is a requirement — a specific kernel, a custom driver, a framework build the managed services do not offer. 'We want a GPU' is not that requirement: SageMaker training jobs, endpoints, and Bedrock all provide GPU compute without handing you an OS to run. Reaching for EC2 because the workload needs a GPU takes on undifferentiated operational burden the managed services absorb. Configuration: the lesson is EC2-GPU only for an OS-level requirement. The losing choice is a self-managed GPU box for a training or hosting job a managed service does, paying in ops for capacity you could rent managed.",
+      "snippets": [
+        {
+          "label": "The decision recorded: managed GPU compute unless the OS itself is the requirement.",
+          "language": "typescript",
+          "source": "const gpuCompute = {\n  chosen: 'SAGEMAKER_MANAGED', // training jobs and endpoints provide GPUs\n  rawEc2GpuOnlyWhen: 'the OS, kernel, driver, or framework build is itself the requirement',\n  // 'we want a GPU' is not that requirement.\n};"
+        }
+      ],
+      "infrastructure": "// A raw EC2 GPU instance hands you the OS, drivers, CUDA stack, and patching. That is justified only when the OS itself is the requirement — a specific kernel or driver or framework build managed services do not offer. 'We want a GPU' is covered by SageMaker training jobs, endpoints, and Bedrock. EC2 for a managed-service job is undifferentiated ops.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the GPU-compute decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: managed GPU compute for training and hosting, with raw EC2 GPU\n// reserved for a genuine OS-level requirement.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The 'do we need EC2' question comes up whenever a GPU is involved, and the\nanswer is almost always no. SageMaker training jobs and endpoints provision\nGPUs and manage the OS; Bedrock abstracts it entirely. A raw EC2 GPU box is\nfor when you need control at the OS layer — a kernel module, a specific\ndriver, a framework compiled a particular way. Absent that, EC2 is\noperational cost (patching, scaling, security) the managed services absorb.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "chosen: 'SAGEMAKER_MANAGED'",
+            "present": true,
+            "message": "Managed GPU compute is chosen — training jobs and endpoints provide GPUs without an OS to run."
+          },
+          {
+            "pattern": "rawEc2GpuOnlyWhen",
+            "present": true,
+            "message": "Raw EC2 GPU is reserved for an OS-level requirement — a kernel, driver, or framework build the managed services do not offer."
+          },
+          {
+            "pattern": "chosen: 'EC2_GPU'",
+            "present": false,
+            "message": "A self-managed EC2 GPU box is not chosen. 'We want a GPU' is covered by managed services; EC2 is ops burden they absorb."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The price stays in the knowledge base",
+      "decision": "Whether this week's price comes from retrieval or from another training run.",
+      "why": "This is the whole point of the voice-vs-facts split, and the Breaks when made concrete. The voice is trained; the facts are retrieved. This week's price and whether the item is in stock change constantly and come from the knowledge base at generation time — never from the weights. Training a price into the model means it quotes last Tuesday's price with confidence, in the brand's voice, which is the one mistake another training run cannot quickly undo. A price change is a knowledge base update, not a reason to retrain. This is runnable: retrieving the current price returns this week's number, fresh, with no training involved. The losing choice is baking facts into the fine-tune, which marries a stale number to the trained voice.",
+      "snippets": [
+        {
+          "label": "The current price and stock come from the knowledge base at generation time — retrieved, not trained.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\n\nfacts = agent.retrieve(\n    knowledgeBaseId=\"KBCATALOG01\",\n    retrievalQuery={\"text\": \"current price and stock for SKU JKT-4412\"},\n)\nfor r in facts[\"retrievalResults\"]:\n    print(r[\"content\"][\"text\"])"
+        },
+        {
+          "label": "From the terminal, confirm the catalog knowledge base is healthy, so the facts the copy quotes are current.",
+          "language": "shell",
+          "source": "aws bedrock-agent get-knowledge-base --knowledge-base-id KBCATALOG01"
+        }
+      ],
+      "infrastructure": "// The price and stock are retrieved from the knowledge base at generation time, never trained into the weights. Training a price in means the model quotes last Tuesday's price with confidence in the brand's voice — the Breaks when. A price change is a knowledge base update; you retrain when the voice eval fails, not when the price changes.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the fact retrieval from the snippets on the left, then Run. The\n# intercept returns this week's price and stock.\n#\n# The goal: the facts come from the knowledge base at generation time, so a\n# price change never requires a training run.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This closes the scenario on its central split. Weights hold the voice,\nwhich is stable and worth training. Retrieval holds the facts, which change\nconstantly and must never be trained in. The failure the whole design\nprevents is a fine-tune that absorbed a price: the number is now stale the\nmoment it changes, wrapped in the confident brand voice, and the only fix\nis another training run — slow, when the price moved an hour ago. Done\nmeans a price change never requires training, which is exactly this step.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "Retrieve",
+            "body": {
+              "retrievalResults": [
+                {
+                  "content": { "text": "SKU JKT-4412: price 118.00 EUR, in stock (42 units), effective 2026-11-02." },
+                  "location": { "type": "S3", "s3Location": { "uri": "s3://brand-catalog/facts/JKT-4412.json" } }
+                }
+              ]
+            }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "GetKnowledgeBase",
+            "body": {
+              "knowledgeBase": { "knowledgeBaseId": "KBCATALOG01", "name": "catalog-facts", "status": "ACTIVE" }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -53,14 +53,17 @@ fn workbench_json(call: &CallStep) -> String {
     let payload = serde_json::json!({
         "workbench": &call.workbench,
         "workerUrl": WORKER.url(),
-        // Whether this step runs a live call. A configuration step seeds a
-        // CDK/config artifact (TypeScript, YAML) to read and assemble, not
-        // Python to execute. It does not run against the intercept; instead
-        // its Run checks the assembled artifact against the structural checks
-        // below. The JS branches on this.
+        // What the single editor and the terminal need. The editor always
+        // renders — every call step seeds files — so there is no pane flag for
+        // it; the asset derives the action button from the open file's
+        // extension (`.py` → Run, `.ts` → Check). The terminal is the one
+        // conditional pane: it appears only on a runnable step, where the
+        // intercept it submits to exists. `runnable` is that one boolean the
+        // asset reads.
         "runnable": call.is_runnable(),
-        // The config step's answer key: checks run in the browser when Run is
-        // pressed on a step with no live call. A runnable step has none.
+        // The answer key: checks run in the browser when the visitor presses
+        // Check on a `.ts` file. Empty on a pure runnable step, which has no
+        // `.ts` file to grade.
         "checks": &call.workbench.checks,
     });
     let json = serde_json::to_string(&payload).expect("workbench serializes");
@@ -338,7 +341,16 @@ pub fn lesson(cursor: &Cursor<'_>, layout: Option<&Layout<'_>>) -> Markup {
                                     (snippet.label)
                                     @if is_reference {
                                         span class="lab-snippet__ref" {
-                                            " — reference, not for the editor"
+                                            // A shell snippet is not editor
+                                            // reference — it has a home, the
+                                            // terminal. Say so rather than
+                                            // "not for the editor", which would
+                                            // imply it has nowhere to go.
+                                            @if snippet.language == "shell" {
+                                                " — run this in the terminal"
+                                            } @else {
+                                                " — reference, not for the editor"
+                                            }
                                         }
                                     }
                                 }
@@ -508,9 +520,9 @@ fn workbench(call: &CallStep) -> Markup {
                 (maud::PreEscaped(workbench_json(call)))
             }
 
-            // The no-script fallback: the file that would be open, readable,
-            // so the step still teaches with the runtime absent or still
-            // loading. The asset replaces this with the live editor.
+            // The no-script fallback: the file that would be open on mount,
+            // readable, so the step still teaches with the runtime absent or
+            // still loading. The asset replaces this with the live editor.
             noscript {
                 pre class="lab-code" {
                     code {
@@ -524,9 +536,21 @@ fn workbench(call: &CallStep) -> Markup {
             }
 
             div class="lab-files" {}
+            // The single editor and its Run/Check output, populated by the
+            // asset. The editor tracks every seeded file and switches between
+            // them from the file tree above; the action button follows the
+            // open file's extension — Run for a `.py` file against the
+            // intercept, Check for a `.ts` file against the step's answer key.
             div class="lab-editor" {}
             div class="lab-output" {}
+            // The terminal and its own output pane, filled by the asset only
+            // on a runnable step (`runnable`). A one-line `aws` runner that
+            // submits the translated command to the same intercept the editor
+            // runs against, so botocore validates it for real; its output is
+            // the verification, distinct from the editor's Run/Check output
+            // above. Empty and collapsed on a pure configuration step.
             div class="lab-cli" {}
+            div class="lab-cli-output" {}
         }
 
         // Both loaded from content-hashed URLs so `script-src 'self'` covers
@@ -839,6 +863,105 @@ mod tests {
         assert_eq!(
             decoded["workbench"]["files"][0]["body"],
             "s = \"</script><b>pwned</b>\""
+        );
+    }
+
+    #[test]
+    fn a_both_languages_step_carries_its_files_and_checks_for_the_single_editor() {
+        // A step that both runs a call and carries an answer key seeds both a
+        // .py file and a .ts file. The single editor tracks both — the payload
+        // must carry every seeded file and the checks for the .ts buffer — and
+        // the payload marks the step runnable so the terminal appears.
+        let catalog = catalog();
+        let scenario = &catalog[0];
+
+        let Some((idx, step)) = scenario.steps.iter().enumerate().find_map(|(i, s)| {
+            s.as_call()
+                .filter(|c| {
+                    c.is_runnable()
+                        && !c.workbench.checks.is_empty()
+                        && c.workbench.files.iter().any(|f| f.path.ends_with(".py"))
+                        && c.workbench.files.iter().any(|f| f.path.ends_with(".ts"))
+                })
+                .map(|c| (i, c))
+        }) else {
+            panic!("the scenario is expected to have a worked both-languages step");
+        };
+
+        let json = workbench_json(step);
+        let payload: serde_json::Value = serde_json::from_str(&json.replace("<\\/", "</")).unwrap();
+
+        // Runnable, so the terminal shows; no pane flags, the editor is always
+        // present and derives its button from the open file's extension.
+        assert_eq!(payload["runnable"], true);
+
+        // Every seeded file rides in the payload so the editor's file tree can
+        // switch between them, the .py and the .ts both.
+        let files = payload["workbench"]["files"]
+            .as_array()
+            .expect("the payload carries the seeded files");
+        let paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with(".py")),
+            "a .py file is in the payload"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with(".ts")),
+            "a .ts file is in the payload"
+        );
+
+        // The answer key rides in the payload for the browser Check on the .ts
+        // buffer.
+        assert!(
+            payload["checks"].as_array().is_some_and(|c| !c.is_empty()),
+            "a both-languages step carries checks"
+        );
+
+        // The page renders the single editor and the terminal containers; the
+        // removed second-editor and standalone infra containers are gone.
+        let cursor = Cursor::at(scenario, idx);
+        let html = step_page(&cursor).into_string();
+        assert!(html.contains(r#"class="lab-editor""#));
+        assert!(html.contains(r#"class="lab-cli""#));
+        assert!(!html.contains("lab-editor-infra"));
+        assert!(!html.contains("lab-output-infra"));
+    }
+
+    #[test]
+    fn the_terminal_renders_only_on_a_runnable_step() {
+        // The terminal is the one conditional pane. The payload marks a
+        // runnable step `runnable: true` and a pure config step `false`; the
+        // asset reads that single boolean to decide whether to fill the
+        // terminal containers. The containers themselves are always in the
+        // template, so the meaningful assertion is on the payload flag.
+        let catalog = catalog();
+        let scenario = &catalog[0];
+
+        let runnable = scenario
+            .steps
+            .iter()
+            .filter_map(|s| s.as_call())
+            .find(|c| c.is_runnable())
+            .expect("a runnable step exists");
+        let config = scenario
+            .steps
+            .iter()
+            .filter_map(|s| s.as_call())
+            .find(|c| !c.is_runnable())
+            .expect("a configuration step exists");
+
+        let run_payload: serde_json::Value =
+            serde_json::from_str(&workbench_json(runnable).replace("<\\/", "</")).unwrap();
+        let cfg_payload: serde_json::Value =
+            serde_json::from_str(&workbench_json(config).replace("<\\/", "</")).unwrap();
+
+        assert_eq!(
+            run_payload["runnable"], true,
+            "a runnable step gets the terminal"
+        );
+        assert_eq!(
+            cfg_payload["runnable"], false,
+            "a config step gets no terminal"
         );
     }
 

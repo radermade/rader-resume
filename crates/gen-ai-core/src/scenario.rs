@@ -57,6 +57,10 @@ pub enum ScenarioError {
         title: String,
         open: String,
     },
+    #[error(
+        "scenario {id} step '{title}' is runnable, so it shows the terminal, but has no shell snippet telling the visitor what to type into it — add a shell snippet with the aws command this step teaches"
+    )]
+    RunnableStepHasNoShell { id: String, title: String },
 }
 
 /// The languages the renderer knows how to label. A snippet in anything else
@@ -154,7 +158,11 @@ pub struct Workbench {
     /// carry a stub or reference notes, but the finished call is what the
     /// visitor writes, not what the step ships.
     pub files: Vec<SeedFile>,
-    /// Which seeded file the editor opens on. The one the visitor writes into.
+    /// Which seeded file the single editor opens on when the step mounts. The
+    /// editor tracks every seeded file and switches between them from the file
+    /// tree, so this names the starting file rather than the only one. The
+    /// action button follows the open file's extension: a `.py` file runs
+    /// against the intercept, a `.ts` file runs the step's `checks`.
     pub open: String,
     /// What the intercepted transport returns, keyed by operation.
     ///
@@ -164,7 +172,8 @@ pub struct Workbench {
     /// PrivateLink endpoint are decisions you configure, and forcing a fake
     /// response onto them would be dishonest. A step with responses runs
     /// against the intercept; a step without is config. The `is_runnable`
-    /// helper is the one place that distinction is read.
+    /// helper is the one place that distinction is read, and it is also what
+    /// decides whether the always-on terminal appears beside the editor.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub responses: Vec<Intercepted>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -200,7 +209,8 @@ pub struct Check {
     pub message: String,
 }
 
-/// A call step: one decision, with its three panes and its environment.
+/// A call step: one decision, with its editor, its terminal, and its
+/// environment.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CallStep {
@@ -444,6 +454,19 @@ impl Scenario {
                     open: bench.open.clone(),
                 });
             }
+
+            // A runnable step shows the always-on terminal, so it must teach a
+            // command to type into it: at least one shell snippet. Without one
+            // the terminal is a tool with no lesson — the gap the audit found
+            // on the Retrieve/RetrieveAndGenerate steps. The shell snippet is
+            // the CLI exercise, and its operation is answered by an authored
+            // response so the command genuinely runs.
+            if call.is_runnable() && !call.snippets.iter().any(|s| s.language == "shell") {
+                return Err(ScenarioError::RunnableStepHasNoShell {
+                    id: scenario.id.clone(),
+                    title: call.title.clone(),
+                });
+            }
         }
 
         Ok(scenario)
@@ -526,5 +549,143 @@ impl<'a> Cursor<'a> {
 
     pub fn is_last(&self) -> bool {
         self.index + 1 >= self.scenario.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal two-step scenario (overview + one call) whose single call
+    /// step's snippets and workbench are supplied as values. Built with
+    /// `json!` rather than string splicing so the test stays free of
+    /// raw-string escaping entirely. Enough to exercise the parse guards
+    /// without carrying a whole authored document.
+    fn scenario_with(snippets: serde_json::Value, workbench: serde_json::Value) -> String {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "id": "test",
+            "name": "Test",
+            "summary": "A test scenario.",
+            "brief": {
+                "whoIsAsking": "a",
+                "whatTheyNeedBack": "b",
+                "systemsAlreadyRunning": "c",
+                "breaksWhen": "d",
+                "doneMeans": "e"
+            },
+            "steps": [
+                {
+                    "kind": "overview",
+                    "title": "Overview",
+                    "diagram": { "nodes": [{ "id": "n", "label": "N" }] }
+                },
+                {
+                    "kind": "call",
+                    "title": "A call",
+                    "decision": "d",
+                    "why": "w",
+                    "snippets": snippets,
+                    "infrastructure": "",
+                    "workbench": workbench
+                }
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_step_with_both_python_and_typescript_files_parses_and_is_runnable() {
+        // The worked case the single editor is built for: a step that seeds
+        // both a .py file and a .ts file, carries responses (so it runs) and
+        // checks (so the .ts file can be graded). The single editor tracks
+        // both files; the action button follows whichever is open. Nothing
+        // here names a second editor or a cli block — those concepts are gone
+        // — so the step is well-formed on the strength of its files alone.
+        let workbench = serde_json::json!({
+            "open": "answer.py",
+            "files": [
+                { "path": "answer.py", "body": "# here\n" },
+                { "path": "stack.ts", "body": "// here\n" }
+            ],
+            "responses": [{ "service": "s", "operation": "Op", "body": {} }],
+            "checks": [{ "pattern": "Bucket", "present": true, "message": "a bucket" }]
+        });
+        // Python to assemble into answer.py, typescript to assemble into
+        // stack.ts. The check pattern lives in the typescript snippet so the
+        // answer-key integrity test is satisfiable.
+        // Python to assemble into answer.py, typescript to assemble into
+        // stack.ts, and a shell snippet for the always-on terminal a runnable
+        // step shows — the guard requires all three where they apply.
+        let snippets = serde_json::json!([
+            { "label": "call", "language": "python", "source": "import boto3\nboto3.client(\"s\").op()" },
+            { "label": "stack", "language": "typescript", "source": "const b = new Bucket();" },
+            { "label": "verify", "language": "shell", "source": "aws s op" }
+        ]);
+        let source = scenario_with(snippets, workbench);
+        let scenario =
+            Scenario::parse(&source).expect("a step seeding both .py and .ts files parses");
+        let call = scenario.steps[1].as_call().unwrap();
+
+        assert!(call.is_runnable(), "a step with responses is runnable");
+        // The editor tracks every seeded file; both are present to switch
+        // between.
+        let paths: Vec<&str> = call
+            .workbench
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(paths.contains(&"answer.py"), "the .py file is seeded");
+        assert!(paths.contains(&"stack.ts"), "the .ts file is seeded");
+        // The answer key rides along for the browser Check on the .ts buffer.
+        assert!(!call.workbench.checks.is_empty(), "the step carries checks");
+    }
+
+    #[test]
+    fn a_pure_config_step_parses_and_is_not_runnable() {
+        // A configuration step: a single .ts file, checks, no responses. The
+        // single editor opens the .ts file, the button is Check, and no
+        // terminal appears because the step is not runnable.
+        let workbench = serde_json::json!({
+            "open": "stack.ts",
+            "files": [{ "path": "stack.ts", "body": "// here\n" }],
+            "checks": [{ "pattern": "Bucket", "present": true, "message": "a bucket" }]
+        });
+        let ts = serde_json::json!([
+            { "label": "stack", "language": "typescript", "source": "const b = new Bucket();" }
+        ]);
+        let source = scenario_with(ts, workbench);
+        let scenario = Scenario::parse(&source).expect("a pure config step parses");
+        let call = scenario.steps[1].as_call().unwrap();
+
+        assert!(!call.is_runnable(), "a config step runs no call");
+        assert!(
+            !call.workbench.checks.is_empty(),
+            "a config step is graded by its checks"
+        );
+    }
+
+    #[test]
+    fn a_runnable_step_without_a_shell_snippet_is_rejected() {
+        // A runnable step shows the always-on terminal, so it must teach a
+        // command to type: at least one shell snippet. Python and a response
+        // but no shell leaves the terminal with no lesson — the gap the audit
+        // found — so the parser rejects it.
+        let workbench = serde_json::json!({
+            "open": "answer.py",
+            "files": [{ "path": "answer.py", "body": "# here\n" }],
+            "responses": [{ "service": "s", "operation": "Op", "body": {} }]
+        });
+        let py = serde_json::json!([
+            { "label": "call", "language": "python", "source": "import boto3\nboto3.client(\"s\").op()" }
+        ]);
+        let source = scenario_with(py, workbench);
+        let err = Scenario::parse(&source)
+            .expect_err("a runnable step with no shell snippet is rejected");
+        assert!(
+            matches!(err, ScenarioError::RunnableStepHasNoShell { .. }),
+            "expected RunnableStepHasNoShell, got {err:?}"
+        );
     }
 }

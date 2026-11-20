@@ -407,6 +407,11 @@
           "label": "The Retrieve filter restricts by department before similarity. The requester's department, not a prompt instruction.",
           "language": "python",
           "source": "found = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n    retrievalConfiguration={\n        \"vectorSearchConfiguration\": {\n            \"filter\": {\"equals\": {\"key\": \"department\", \"value\": \"hr\"}}\n        }\n    },\n)\n\nfor chunk in found[\"retrievalResults\"]:\n    dept = chunk[\"metadata\"][\"department\"]\n    uri = chunk[\"location\"][\"s3Location\"][\"uri\"]\n    print(f\"[{dept}] {uri}\")\n    print(chunk[\"content\"][\"text\"])"
+        },
+        {
+          "label": "Before trusting the filter, confirm the data source finished ingesting — type this in the terminal. list-data-sources is a control-plane call on bedrock-agent; a filter can only match metadata that was actually indexed.",
+          "language": "shell",
+          "source": "aws bedrock-agent list-data-sources --knowledge-base-id KB1234567890"
         }
       ],
       "infrastructure": "// The department lives in a sidecar beside each object, ingested as a\n// filterable attribute. Isolation is this filter plus IAM, never a prompt\n// instruction: 'only use HR docs' arrives after the other chunks are\n// already in context. The same key is on every object, or a missing key\n// drops the document without an error.",
@@ -445,6 +450,21 @@
                 }
               ]
             }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "ListDataSources",
+            "body": {
+              "dataSourceSummaries": [
+                {
+                  "knowledgeBaseId": "KB1234567890",
+                  "dataSourceId": "DS1234567890",
+                  "name": "policy-pdfs",
+                  "status": "AVAILABLE",
+                  "updatedAt": "2026-11-02T06:15:00Z"
+                }
+              ]
+            }
           }
         ]
       }
@@ -459,6 +479,11 @@
           "label": "The ingestion job on the control plane. This is the Python to assemble into ingest.py and Run. It is async — the status comes back STARTING, so you poll the job rather than assume it is done. The event-driven trigger that calls this on every upload is in the Infrastructure pane, not here.",
           "language": "python",
           "source": "import boto3\n\nagent_build = boto3.client(\"bedrock-agent\", region_name=\"eu-central-1\")\n\njob = agent_build.start_ingestion_job(\n    knowledgeBaseId=\"KB1234567890\",\n    dataSourceId=\"DS1234567890\",\n)\nprint(job[\"ingestionJob\"][\"status\"])"
+        },
+        {
+          "label": "Because ingestion is async, poll it from the terminal — list-ingestion-jobs shows the recent jobs and their status. STARTING means it is still running; you do not assume COMPLETE because StartIngestionJob returned.",
+          "language": "shell",
+          "source": "aws bedrock-agent list-ingestion-jobs --knowledge-base-id KB1234567890 --data-source-id DS1234567890"
         }
       ],
       "infrastructure": "// Event-driven ingest: an object lands, a job starts. A nightly or weekly\n// full rebuild serves this morning's superseded policy until it finishes.\n// The deletion policy removes vectors for deleted objects, because a\n// retained vector keeps a withdrawn policy citable — the stale-answer\n// failure again.\ncorpus.addEventNotification(\n  EventType.OBJECT_CREATED,\n  new LambdaDestination(startIngestFn),\n);",
@@ -486,6 +511,21 @@
                 "status": "STARTING"
               }
             }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "ListIngestionJobs",
+            "body": {
+              "ingestionJobSummaries": [
+                {
+                  "knowledgeBaseId": "KB1234567890",
+                  "dataSourceId": "DS1234567890",
+                  "ingestionJobId": "IJ1234567890",
+                  "status": "STARTING",
+                  "updatedAt": "2026-11-02T06:16:00Z"
+                }
+              ]
+            }
           }
         ]
       }
@@ -507,9 +547,24 @@
           "source": "found = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n)\n\nfor chunk in found[\"retrievalResults\"]:\n    print(chunk[\"location\"][\"s3Location\"][\"uri\"])\n\ncontext = \"\\n\\n\".join(c[\"content\"][\"text\"] for c in found[\"retrievalResults\"])"
         },
         {
+          "label": "Before retrieving, verify the knowledge base is set up — type this in the terminal below. Note the client: checking a KB is a control-plane call on bedrock-agent, not the bedrock-agent-runtime plane you Retrieve on. Same two-planes split as Retrieve vs Converse. It returns the KB's status, so an ACTIVE here means the Retrieve above has something to read.",
+          "language": "shell",
+          "source": "aws bedrock-agent get-knowledge-base --knowledge-base-id KB1234567890"
+        },
+        {
           "label": "Converse on bedrock-runtime. The eu. prefix keeps inference in the EU, and maxTokens is set because an unset cap is how one turn becomes the bill.",
           "language": "python",
           "source": "reply = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[\n        {\n            \"role\": \"user\",\n            \"content\": [{\"text\": f\"{context}\\n\\nQuestion: {QUESTION}\"}],\n        }\n    ],\n    inferenceConfig={\"maxTokens\": 512},\n)\n\nprint(reply[\"stopReason\"])\nprint(reply[\"output\"][\"message\"][\"content\"][0][\"text\"])"
+        },
+        {
+          "label": "The infrastructure behind the call (assemble into stack.ts, then Check): a private EU corpus bucket. The call retrieves from a knowledge base over this, not from a fine-tune.",
+          "language": "typescript",
+          "source": "const corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});"
+        },
+        {
+          "label": "The knowledge base the Retrieve call reads from — retrieval, not a CreateModelCustomizationJob. The absence of a customization is the decision.",
+          "language": "typescript",
+          "source": "const kb = new CfnKnowledgeBase(this, 'PolicyKB', {\n  name: 'policy-assistant',\n  roleArn: kbRole.roleArn,\n  knowledgeBaseConfiguration: {\n    type: 'VECTOR',\n    vectorKnowledgeBaseConfiguration: { embeddingModelArn: titanEmbedArn },\n  },\n  storageConfiguration: storage,\n});"
         }
       ],
       "infrastructure": "// Retrieval is a knowledge base, not a training job. Nothing here\n// provisions a customization.\nconst corpus = new Bucket(this, 'PolicyCorpus', {\n  blockPublicAccess: BlockPublicAccess.BLOCK_ALL,\n  encryption: BucketEncryption.S3_MANAGED,\n  versioned: true,\n});",
@@ -519,6 +574,10 @@
           {
             "path": "answer.py",
             "body": "# Assemble the call here from the snippets on the left, then Run.\n#\n# The goal: retrieve from the HR knowledge base, then answer the question\n# with Converse, printing the cited file and the reply.\n"
+          },
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the infrastructure the call depends on from the TypeScript\n// snippets on the left, then Check. This is the stack behind the Retrieve\n// call: a private EU corpus bucket and a knowledge base over it — retrieval,\n// not a customization job.\n"
           },
           {
             "path": "NOTES.md",
@@ -567,6 +626,23 @@
                 "totalTokens": 470
               }
             }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "GetKnowledgeBase",
+            "body": {
+              "knowledgeBase": {
+                "knowledgeBaseId": "KB1234567890",
+                "name": "policy-assistant",
+                "status": "ACTIVE",
+                "roleArn": "arn:aws:iam::111122223333:role/policy-kb-role",
+                "knowledgeBaseConfiguration": {
+                  "type": "VECTOR"
+                },
+                "createdAt": "2025-01-14T09:20:00Z",
+                "updatedAt": "2025-02-03T16:45:00Z"
+              }
+            }
           }
         ],
         "reasons": [
@@ -579,6 +655,23 @@
             "onException": "AttributeError",
             "whenMessageContains": "converse",
             "prose": "The agent client has no converse method at all, so this fails as a plain AttributeError before any request is built. Converse lives on bedrock-runtime; Retrieve on bedrock-agent-runtime. Two planes, two clients. The lesson is that the wrong client is wrong in Python, not at the service."
+          }
+        ],
+        "checks": [
+          {
+            "pattern": "CfnKnowledgeBase",
+            "present": true,
+            "message": "The stack provisions a knowledge base — the retrieval surface the Retrieve call reads from. Retrieval reads the current file at answer time, so a weekly policy edit is live without retraining."
+          },
+          {
+            "pattern": "BLOCK_ALL",
+            "present": true,
+            "message": "The corpus bucket blocks all public access. The policy text is private, read only by the knowledge base role."
+          },
+          {
+            "pattern": "ModelCustomizationJob",
+            "present": false,
+            "message": "No customization job. Fine-tuning freezes the policy wording into weights and cannot cite a file — the stale-but-confident failure this scenario is built against, and the reason the call above is a Retrieve, not a trained model."
           }
         ]
       }
@@ -598,6 +691,11 @@
           "label": "The answer, then the file each cited span came from. The citation is the point, not a nicety.",
           "language": "python",
           "source": "print(out[\"output\"][\"text\"])\n\nfor citation in out[\"citations\"]:\n    for ref in citation[\"retrievedReferences\"]:\n        print(ref[\"location\"][\"s3Location\"][\"uri\"])"
+        },
+        {
+          "label": "Confirm the knowledge base RetrieveAndGenerate reads from exists in the account — type this in the terminal. list-knowledge-bases is the control-plane inventory call; the id you pass to the data-plane call has to be one of these.",
+          "language": "shell",
+          "source": "aws bedrock-agent list-knowledge-bases"
         }
       ],
       "infrastructure": "// RetrieveAndGenerate needs no new infrastructure beyond the knowledge base\n// and the model access already provisioned. The citation array it returns is\n// what makes the answer actionable: a file name the employee can open, not a\n// paraphrase they have to trust.",
@@ -644,6 +742,20 @@
                 }
               ],
               "sessionId": "session-abc123"
+            }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "ListKnowledgeBases",
+            "body": {
+              "knowledgeBaseSummaries": [
+                {
+                  "knowledgeBaseId": "KB1234567890",
+                  "name": "policy-assistant",
+                  "status": "ACTIVE",
+                  "updatedAt": "2026-02-03T16:45:00Z"
+                }
+              ]
             }
           }
         ]
@@ -1119,6 +1231,11 @@
           "label": "The retrieval-failure checklist, in order. The prompt and model are last, not first.",
           "language": "python",
           "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\nQUESTION = \"How many weeks of parental leave apply in Germany?\"\n\n# Right document never comes back, or the wrong department's text does:\n# 1. The filter. A missing `department` key drops a document silently.\n# 2. The ingest. Is the policy indexed, or is the sync behind?\n# 3. The embedding model. Changed without a rebuild = two mixed spaces.\n# Only after those: the prompt, lost-in-the-middle, k too high, grounding.\nfound = agent.retrieve(\n    knowledgeBaseId=\"KB1234567890\",\n    retrievalQuery={\"text\": QUESTION},\n)\nprint(len(found[\"retrievalResults\"]), \"chunks\")  # zero is the tell"
+        },
+        {
+          "label": "Step two of the checklist from the terminal: is the knowledge base even healthy? get-knowledge-base shows its status. An ACTIVE base with zero chunks points you at the filter or the ingest, not the prompt — which is the whole ordering lesson.",
+          "language": "shell",
+          "source": "aws bedrock-agent get-knowledge-base --knowledge-base-id KB1234567890"
         }
       ],
       "infrastructure": "// Nothing new to provision. This step is the diagnosis that connects the\n// earlier decisions to their failure modes: the metadata filter, the\n// incremental ingest, and the embedding dimension are the first three\n// things to check, in that order, before the prompt.",
@@ -1140,6 +1257,21 @@
             "operation": "Retrieve",
             "body": {
               "retrievalResults": []
+            }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "GetKnowledgeBase",
+            "body": {
+              "knowledgeBase": {
+                "knowledgeBaseId": "KB1234567890",
+                "name": "policy-assistant",
+                "status": "ACTIVE",
+                "knowledgeBaseConfiguration": {
+                  "type": "VECTOR"
+                },
+                "updatedAt": "2026-11-02T06:20:00Z"
+              }
             }
           }
         ]

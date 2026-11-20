@@ -1,0 +1,354 @@
+{
+  "schemaVersion": 1,
+  "id": "analyst-workspace",
+  "name": "Analyst workspace",
+  "summary": "Three audiences onto one governed lake, where an analyst seeing a column they are not cleared for takes all three surfaces down.",
+  "brief": {
+    "whoIsAsking": "An insurer's analytics group: business analysts who want to ask curated claims data in their own words and automate a weekly summary, data scientists who want one environment over the lake, and application engineers whose work is code with tests.",
+    "whatTheyNeedBack": "An analyst gets the answer and a chart, the weekly summary runs without them, the scientists work in one place, and the engineers ship through a repository — all bounded by what each person is cleared to see.",
+    "systemsAlreadyRunning": "One governed data lake with Lake Formation permissions. The group's instinct is to build a chatbot over the warehouse, but they have no team to run one and the questions are analytics questions with charts attached.",
+    "breaksWhen": "An analyst sees a column they are not cleared for. The lake's permissions are the only reason three surfaces were allowed onto it, so a workspace that reads past them takes the other two down with it.",
+    "doneMeans": "An analyst gets that answer and the weekly summary runs without them, the scientists work in one environment, and the engineers' changes ship through a repository rather than a saved canvas."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "lake", "label": "Governed lake (Lake Formation)", "icon": "s3", "group": "acct", "flowsTo": ["quick", "studio"] },
+          { "id": "quick", "label": "Amazon Quick", "icon": "bedrock", "group": "acct", "flowsTo": ["sight", "flows"] },
+          { "id": "sight", "label": "Quick Sight (BI)", "group": "acct" },
+          { "id": "flows", "label": "Quick Flows / Automate", "group": "acct" },
+          { "id": "studio", "label": "SageMaker Unified Studio", "group": "acct" },
+          { "id": "engineers", "label": "Engineers (Kiro / Q Developer)", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Amazon Quick for the analyst",
+      "decision": "Whether to build a chatbot over the warehouse, or adopt Amazon Quick as the analyst workspace.",
+      "why": "The group's instinct is to build a chatbot over the warehouse, but the question they actually get — 'why did claims in the north region move last week' — is an analytics question with a chart attached, not a free-text chat. And they have no team to run a bespoke chatbot. Amazon Quick is that workspace as a product: natural-language questions over curated data, the chart, and the automation in one place. The assistant they were going to build is this. Configuration: the lesson is adopting Quick rather than building the chatbot. The losing choice is a hand-built chat-over-warehouse, which is a service to operate and a worse version of a product that already exists.",
+      "snippets": [
+        {
+          "label": "Amazon Quick as the analyst workspace over the curated lake. The product, not a bespoke chatbot.",
+          "language": "typescript",
+          "source": "const workspace = {\n  product: 'AMAZON_QUICK',\n  over: curatedLakeDatasetArn,\n  // Natural-language questions + chart + automation in one workspace.\n  // Not a chatbot the team would have to build and run.\n};"
+        }
+      ],
+      "infrastructure": "// Amazon Quick is the analyst workspace: natural-language questions over curated data, the chart, and the automation in one product. The question is an analytics question with a chart, not free-text chat, and the group has no team to run a bespoke chatbot. The assistant they were going to build is Quick.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the workspace decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: adopt Amazon Quick as the analyst workspace, rather than\n// building and running a chatbot over the warehouse.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Amazon Quick is what Amazon QuickSight became: an agentic analytics\nworkspace with Quick Sight (BI), Quick Flows, Quick Automate, and Quick\nResearch behind one chat surface. The decision is build-vs-adopt. A\nhand-built chatbot over the warehouse is a service the analytics group\nwould own and operate, duplicating a product that already does\nnatural-language-to-chart over governed data. 'We have no team to run one'\nis the deciding constraint.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "product: 'AMAZON_QUICK'",
+            "present": true,
+            "message": "Amazon Quick is adopted as the workspace — the product that already does natural-language-to-chart over governed data."
+          },
+          {
+            "pattern": "over: curatedLakeDatasetArn",
+            "present": true,
+            "message": "The workspace reads the curated lake dataset, so the questions run over governed data."
+          },
+          {
+            "pattern": "buildChatbot",
+            "present": false,
+            "message": "No bespoke chatbot is built. That is a service the group would have to run, a worse version of a product that already exists."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Quick against Q Business, by question shape",
+      "decision": "Whether this is a Quick (analytics) workspace or a Q Business (enterprise-content) assistant.",
+      "why": "Both are 'chat,' so the word does not decide — the question shape does. Q Business answers from enterprise content (wikis, SharePoint, tickets) and honours those sources' permissions; it is the right tool when the question is 'what does the policy say.' Quick is the analytics and automation workspace over data; it is right when the question is 'why did claims in the north region move,' which wants a query and a chart. This group's questions are analytics questions, so it is Quick. Configuration: the lesson is choosing by question shape, not by the word chat. The losing choice is Q Business for an analytics workload, which answers from documents when the question needs a query over the lake.",
+      "snippets": [
+        {
+          "label": "The decision by question shape: Quick for analytics-over-data, Q Business for enterprise-content answers.",
+          "language": "typescript",
+          "source": "const surface = {\n  chosen: 'AMAZON_QUICK', // the question is 'why did claims move' — a query + chart\n  qBusinessIsFor: 'answers from enterprise content, honouring source permissions',\n  // The question shape decides, not the word 'chat'.\n};"
+        }
+      ],
+      "infrastructure": "// Quick and Q Business are both 'chat,' so the question shape decides. Q Business answers from enterprise content and honours those sources' permissions — right for 'what does the policy say.' Quick is analytics and automation over data — right for 'why did claims in the north region move,' which wants a query and a chart. This workload is analytics, so Quick.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the surface decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: Quick for the analytics question shape, with Q Business\n// recognized as the tool for enterprise-content answers.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The employee-answers scenario chose Q Business because its questions were\nenterprise-content questions honouring source ACLs. This scenario chooses\nQuick because its questions are analytics-over-data. Same surface word\n('chat'), opposite product, decided by question shape: content lookup vs\nquery-and-chart. The trap is letting 'they both chat' collapse the\ndistinction — they read different things and enforce permissions in\ndifferent layers.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "chosen: 'AMAZON_QUICK'",
+            "present": true,
+            "message": "Quick is chosen for the analytics question shape — a query and a chart over data."
+          },
+          {
+            "pattern": "qBusinessIsFor",
+            "present": true,
+            "message": "Q Business is recorded as the tool for enterprise-content answers, so the distinction is by question shape, not the word chat."
+          },
+          {
+            "pattern": "question shape decides",
+            "present": true,
+            "message": "The question shape decides, not 'chat' — analytics-over-data is Quick, content-lookup is Q Business."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Quick Flows and Quick Automate for the weekly summary",
+      "decision": "Whether the recurring weekly summary is a maintained Lambda or a Quick Flow and Quick Automate.",
+      "why": "The analysts assemble a weekly summary by hand, and the obvious automation is a Lambda someone writes. But that Lambda is the version of this that rots: it is code outside the analytics workspace, maintained by whoever wrote it, breaking quietly when the data shape shifts. Quick Flows and Quick Automate build the recurring summary inside the workspace, on the same governed data, maintained as a flow by the analysts who own the report. Configuration: the lesson is the in-workspace flow for the recurring task. The losing choice is the bespoke Lambda, which moves the report into code the analytics team cannot maintain and that decays the first time nobody is watching.",
+      "snippets": [
+        {
+          "label": "The weekly summary as a Quick Flow with Quick Automate scheduling it — inside the workspace, on governed data.",
+          "language": "typescript",
+          "source": "const weekly = {\n  flow: 'QUICK_FLOW', // the summary built in the workspace, on governed data\n  automate: { schedule: 'weekly' },\n  // Not a Lambda outside the workspace that rots when the data shifts.\n};"
+        }
+      ],
+      "infrastructure": "// The weekly summary is a Quick Flow scheduled by Quick Automate — built inside the workspace, on the same governed data, maintained by the analysts who own the report. A bespoke Lambda is the version of this that rots: code outside the workspace that breaks quietly when the data shape shifts and whoever wrote it has moved on.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the weekly-summary automation from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the recurring summary is a Quick Flow on governed data, not a\n// Lambda outside the workspace that rots.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Quick Flows build multi-step analytics actions inside the workspace; Quick\nAutomate schedules and triggers them. The point is ownership and\ngovernance: the flow runs on the same governed lake with the same\npermissions, maintained by the report's owners. A Lambda is a separate\nartifact in a separate lifecycle — it works until the schema moves or the\nauthor leaves, then it is an orphaned job nobody in analytics can fix.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "flow: 'QUICK_FLOW'",
+            "present": true,
+            "message": "The weekly summary is a Quick Flow inside the workspace, on governed data, owned by the analysts."
+          },
+          {
+            "pattern": "automate",
+            "present": true,
+            "message": "Quick Automate schedules the flow, so the summary runs without the analysts assembling it by hand."
+          },
+          {
+            "pattern": "new Function(",
+            "present": false,
+            "message": "No bespoke Lambda for the summary. A Lambda outside the workspace rots when the data shifts or its author leaves."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Quick Sight is the BI surface inside Quick",
+      "decision": "Where the dashboard lives, given Quick Sight is the BI surface inside Quick.",
+      "why": "The dashboard is not a separate BI product bolted on — Quick Sight is the BI surface inside Quick, which is what Amazon QuickSight became. The analyst's chart and the dashboard live there, on the same governed data, inside the same workspace the natural-language questions and flows use. Reaching for a separate BI tool would re-create the four-consoles problem this build is meant to collapse. Configuration: the lesson is Quick Sight as the in-workspace BI surface. The losing choice is a standalone dashboarding product alongside Quick, which splits the analyst across two tools and two permission models over the same lake.",
+      "snippets": [
+        {
+          "label": "The dashboard lives in Quick Sight, the BI surface inside Quick — not a separate BI product.",
+          "language": "typescript",
+          "source": "const dashboard = {\n  surface: 'QUICK_SIGHT', // the BI surface inside Quick (what QuickSight became)\n  over: curatedLakeDatasetArn,\n  // Same workspace, same governed data as the questions and flows.\n};"
+        }
+      ],
+      "infrastructure": "// Quick Sight is the BI surface inside Quick — what Amazon QuickSight became. The dashboard lives there, on the same governed data, inside the same workspace as the natural-language questions and the flows. A separate BI product alongside Quick re-creates the four-consoles problem and splits the analyst across two permission models over one lake.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the dashboard-surface decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the dashboard lives in Quick Sight, the BI surface inside\n// Quick, not a separate BI tool over the same lake.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Quick Sight is the rename-and-absorb of QuickSight into Quick: the BI and\ndashboarding surface, now one tab of the agentic workspace rather than a\nstandalone product. The whole thrust of this scenario is consolidation onto\none governed lake with one set of surfaces, so the dashboard belonging to\nQuick Sight — not a fourth tool the group buys — is the point. Where an\nolder design says QuickSight, it means Quick Sight.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "surface: 'QUICK_SIGHT'",
+            "present": true,
+            "message": "The dashboard lives in Quick Sight, the BI surface inside Quick, on the same governed data as the questions and flows."
+          },
+          {
+            "pattern": "inside Quick",
+            "present": true,
+            "message": "Quick Sight is one surface of the workspace, not a separate BI product that would split the analyst across two tools."
+          },
+          {
+            "pattern": "over: curatedLakeDatasetArn",
+            "present": true,
+            "message": "The dashboard reads the same curated lake dataset, so BI and the natural-language questions share one governed source."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "SageMaker Unified Studio for the builders",
+      "decision": "Whether the data scientists work across four consoles, or in one environment over the lake, notebooks, and model work.",
+      "why": "The scientists keep juggling four consoles and four credential sets — the lake, the notebooks, the training, the catalog. SageMaker Unified Studio is one environment over all of it: the governed lake, the notebooks, and the model work in a single place with one access model. That collapses the four-tool sprawl the group keeps feeding, and it sits over the same governed lake the analysts' Quick workspace reads. Configuration: the lesson is Unified Studio as the single builder environment. The losing choice is the status quo of separate consoles, which is four permission surfaces onto the lake and four places for an access mistake to hide.",
+      "snippets": [
+        {
+          "label": "SageMaker Unified Studio as the single builder environment over the lake, notebooks, and model work.",
+          "language": "typescript",
+          "source": "const builders = {\n  environment: 'SAGEMAKER_UNIFIED_STUDIO',\n  over: ['governed_lake', 'notebooks', 'model_work'],\n  // One environment, one access model — not four consoles and four creds.\n};"
+        }
+      ],
+      "infrastructure": "// SageMaker Unified Studio is one environment over the governed lake, the notebooks, and the model work, with one access model — collapsing the four-console, four-credential sprawl the scientists live in. It sits over the same governed lake the analysts' Quick workspace reads, so builders and analysts share one source and one permission layer.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the builder-environment decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the scientists work in SageMaker Unified Studio, one\n// environment over the lake, notebooks, and model work.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "SageMaker Unified Studio is the single pane over data, analytics, and ML —\nthe builder-facing counterpart to the analyst's Quick workspace, over the\nsame governed lake. The consolidation theme repeats: one environment, one\naccess model, instead of the four-consoles-four-credentials sprawl that is\nboth a productivity cost and a security surface. Fewer places to grant\naccess is fewer places to grant it wrong.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "SAGEMAKER_UNIFIED_STUDIO",
+            "present": true,
+            "message": "SageMaker Unified Studio is the single builder environment over the lake, notebooks, and model work."
+          },
+          {
+            "pattern": "one access model",
+            "present": true,
+            "message": "One environment with one access model collapses the four-console, four-credential sprawl — fewer places to grant access wrong."
+          },
+          {
+            "pattern": "four consoles",
+            "present": true,
+            "message": "The status quo of four separate consoles is named as the losing shape the single environment replaces."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Kiro for agentic change, Q Developer for inline",
+      "decision": "Which tool the engineers use for application code — an agentic IDE that specs, plans, and tests, or inline IDE assistance.",
+      "why": "The engineers' work is application code that needs a spec, a plan, and tests — not a saved canvas or a prompt. Kiro is the agentic IDE for that: a change driven through a spec, a plan, and tests, landing in a repository. Amazon Q Developer is inline assistance inside the IDE — completions and answers as you type. Both have a place; the line is the change's nature. Employee answers drew the line between an IDE assistant and an enterprise index; this draws it between an agentic IDE and an inline one. Configuration: the lesson is Kiro for spec-driven change, Q Developer for inline help. The losing choice is treating inline assistance as the tool for a change that needs a spec and tests, which ships code without the discipline the engineers' work requires.",
+      "snippets": [
+        {
+          "label": "Kiro for a spec-plan-test change in a repository; Q Developer for inline IDE assistance.",
+          "language": "typescript",
+          "source": "const engineering = {\n  specDrivenChange: 'KIRO', // agentic: spec, plan, tests, lands in a repo\n  inlineAssist: 'AMAZON_Q_DEVELOPER', // completions and answers in the IDE\n  // The change's nature decides, not habit.\n};"
+        }
+      ],
+      "infrastructure": "// Kiro is the agentic IDE for an application-code change that needs a spec, a plan, and tests, landing in a repository. Amazon Q Developer is inline assistance inside the IDE — completions and answers as you type. The line is the change's nature: spec-driven and tested goes to Kiro, in-the-flow help is Q Developer. Both have a place; neither is the other.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the engineering-tool decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: Kiro for spec-plan-test changes in a repository, Q Developer\n// for inline IDE assistance — chosen by the change's nature.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two lines drawn across the Q/Kiro family. Employee answers: Q Business\n(enterprise index) vs Q Developer (IDE assistant). Here: Kiro (agentic IDE\nthat specs, plans, and tests a change into a repo) vs Q Developer (inline\nassistance in the editor). The common thread is matching the tool to the\nwork, not the brand: an application change with tests is not the same job\nas a completion while typing, even though both happen in an IDE.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "specDrivenChange: 'KIRO'",
+            "present": true,
+            "message": "Kiro is the agentic IDE for a spec-plan-test change that lands in a repository."
+          },
+          {
+            "pattern": "inlineAssist: 'AMAZON_Q_DEVELOPER'",
+            "present": true,
+            "message": "Amazon Q Developer is inline IDE assistance — completions and answers in the editor."
+          },
+          {
+            "pattern": "change's nature decides",
+            "present": true,
+            "message": "The change's nature decides, not habit — spec-driven and tested is Kiro, in-the-flow help is Q Developer."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Lake Formation column permissions under all three",
+      "decision": "Whether each surface enforces its own access, or Lake Formation column permissions sit under all three.",
+      "why": "This is the Breaks when and the spine of the whole build. Three surfaces read one lake, and an analyst seeing a column they are not cleared for takes all three down — the lake's permissions are the only reason three surfaces were allowed onto it. So access is enforced once, in Lake Formation, with column-level (and row-level) permissions under Quick, Unified Studio, and every other reader. A workspace that 'asks nicely' — a prompt instruction to avoid a column — is not an access control; the grant is. This is runnable: listing the Lake Formation permissions shows the column grants each surface inherits. The losing choice is per-surface access logic, which is three places to get the same grant wrong and three chances to leak a restricted column.",
+      "snippets": [
+        {
+          "label": "The Lake Formation client, listing the column-level permissions every surface reads through.",
+          "language": "python",
+          "source": "import boto3\n\nlf = boto3.client(\"lakeformation\", region_name=\"eu-central-1\")\n\nout = lf.list_permissions(\n    Resource={\"TableWithColumns\": {\"DatabaseName\": \"claims\", \"Name\": \"policy\", \"ColumnNames\": [\"region\", \"amount\"]}},\n)\nfor p in out[\"PrincipalResourcePermissions\"]:\n    print(p[\"Principal\"][\"DataLakePrincipalIdentifier\"], p[\"Permissions\"])"
+        },
+        {
+          "label": "From the terminal, list the Lake Formation resources so you confirm governance is registered before the surfaces read.",
+          "language": "shell",
+          "source": "aws lakeformation list-resources"
+        }
+      ],
+      "infrastructure": "// Access is enforced once, in Lake Formation, with column- and row-level permissions under Quick, Unified Studio, and every reader. Three surfaces read one lake; an analyst seeing an uncleared column takes all three down. A workspace that asks nicely — a prompt to avoid a column — is not an access control. The grant is, and it lives below every surface.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the Lake Formation permission check from the snippets on the\n# left, then Run. The intercept returns the column grants each surface\n# inherits.\n#\n# The goal: access is enforced once in Lake Formation under all three\n# surfaces, so no surface can read a column it is not granted.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Lake Formation column and row permissions are the single enforcement point\nunder every surface — Quick, Quick Sight, Unified Studio. Because access is\ngranted at the lake, a surface physically cannot return a column the\nprincipal was not granted, regardless of what a prompt says. This is the\nstructural answer to the Breaks when: 'an analyst sees a column they are\nnot cleared for' is prevented by the grant, not by the workspace behaving.\nThe same Lake Formation column control recurs in the credit-explanations\nand shared-platform builds.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "lakeformation",
+            "operation": "ListPermissions",
+            "body": {
+              "PrincipalResourcePermissions": [
+                { "Principal": { "DataLakePrincipalIdentifier": "arn:aws:iam::111122223333:role/analyst" }, "Permissions": ["SELECT"] }
+              ]
+            }
+          },
+          {
+            "service": "lakeformation",
+            "operation": "ListResources",
+            "body": {
+              "ResourceInfoList": [
+                { "ResourceArn": "arn:aws:s3:::insurer-governed-lake", "RoleArn": "arn:aws:iam::111122223333:role/LakeFormationServiceRole" }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

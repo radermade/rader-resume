@@ -474,7 +474,8 @@ pre {
 .lab-files,
 .lab-editor,
 .lab-output,
-.lab-cli {
+.lab-cli,
+.lab-cli-output {
   font-family: var(--lab-mono);
   font-size: 0.8125rem;
   color: var(--lab-code);
@@ -484,10 +485,36 @@ pre {
   min-block-size: 18rem;
 }
 
-.lab-output {
+.lab-output,
+.lab-cli-output {
   min-block-size: 6rem;
   color: var(--lab-text);
   white-space: pre-wrap;
+}
+
+/* The terminal pane: a one-line runner below the single editor, present on a
+   runnable step and empty on a pure configuration step. Empty, it collapses to
+   nothing (no border, no heading); filled, the divider and heading appear. */
+.lab-cli:not(:empty) {
+  padding-block-start: var(--lab-space-3);
+  border-block-start: 1px solid var(--lab-border);
+}
+
+.lab-cli:not(:empty)::before {
+  content: "Terminal";
+  display: block;
+  margin-block-end: var(--lab-space-2);
+  font-family: var(--lab-mono);
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--lab-text-muted);
+}
+
+/* The terminal output pane collapses when empty, so it takes no space on a
+   step without a terminal. */
+.lab-cli-output:empty {
+  min-block-size: 0;
 }
 
 /* The file tree the asset mounts. */

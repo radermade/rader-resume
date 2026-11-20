@@ -1,0 +1,475 @@
+{
+  "schemaVersion": 1,
+  "id": "product-catalog-search",
+  "name": "Product catalog search",
+  "summary": "One search box that must serve both a pasted product id and a vague sentence, on the OpenSearch cluster the retailer already runs.",
+  "brief": {
+    "whoIsAsking": "A shopper who types 'blue waterproof jacket under 120' or pastes a product id from a receipt, expecting both to work in the same box.",
+    "whatTheyNeedBack": "The product id hits exactly on a keyword; the sentence finds the jacket even when the wording does not match the title; the wrong-region sku never appears.",
+    "systemsAlreadyRunning": "A few million SKUs in OpenSearch, already the keyword search cluster. The search team keeps running it and will not adopt a second store. Prices and availability change through the day on a product bus.",
+    "breaksWhen": "The receipt lookup stops working. A shopper pasting a product id is the highest-intent traffic on the site, and a search box that fails them is worse than having added no semantic search at all.",
+    "doneMeans": "The product id still hits on a keyword, the sentence finds the jacket even when the wording does not match the title, the EU-only sku is filtered out before ranking, and a guide unpublished this morning is gone from the index tonight."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "shopper", "label": "Shopper", "flowsTo": ["gateway"] },
+          { "id": "gateway", "label": "API Gateway", "icon": "api-gateway", "group": "acct", "flowsTo": ["lambda"] },
+          { "id": "lambda", "label": "AWS Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["opensearch", "bedrock"] },
+          { "id": "bus", "label": "Product bus (EventBridge)", "group": "acct", "flowsTo": ["ingest"] },
+          { "id": "ingest", "label": "Ingest Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["opensearch"] },
+          { "id": "opensearch", "label": "OpenSearch (hybrid)", "group": "acct" },
+          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Hybrid search, because the id is a keyword",
+      "decision": "Whether the box is a vector search, or a hybrid of keyword and vector, so a pasted product id and a vague sentence both work.",
+      "why": "A product id from a receipt is an exact token: it either matches or it does not, and a keyword (BM25) search nails it. A vague sentence shares no words with the title and needs a vector search. A vector-only store answers the sentence and fails the id — the id embeds to a point near nothing, and the highest-intent traffic on the site gets zero results. That is the Breaks when exactly. Hybrid runs both and fuses the scores, so the id hits on the keyword side and the sentence hits on the vector side. This is runnable: the hybrid query returns the jacket for the sentence and the exact sku for the id. The losing choice is vector-only, which quietly breaks the receipt lookup.",
+      "snippets": [
+        {
+          "label": "The OpenSearch client. The cluster the retailer already runs, reached over its endpoint.",
+          "language": "python",
+          "source": "import boto3\nfrom opensearchpy import OpenSearch\n\n# The embedding for the vector clause comes from Bedrock Titan.\nbedrock = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\nclient = OpenSearch(hosts=[{\"host\": \"catalog.example\", \"port\": 443}], use_ssl=True)\n\nQUERY = \"blue waterproof jacket under 120\""
+        },
+        {
+          "label": "A hybrid query: a keyword clause and a vector clause, fused. The id matches on the keyword side; the sentence matches on the vector side.",
+          "language": "python",
+          "source": "body = {\n    \"query\": {\n        \"hybrid\": {\n            \"queries\": [\n                {\"match\": {\"title\": QUERY}},\n                {\"knn\": {\"embedding\": {\"vector\": embed(QUERY), \"k\": 10}}},\n            ]\n        }\n    }\n}\nhits = client.search(index=\"catalog\", body=body)\nfor h in hits[\"hits\"][\"hits\"]:\n    print(h[\"_source\"][\"sku\"], h[\"_source\"][\"title\"])"
+        },
+        {
+          "label": "From the terminal, invoke the embedding model the vector clause depends on — invoke-model confirms Titan is reachable before you debug the query.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-provider amazon"
+        }
+      ],
+      "infrastructure": "// Hybrid: a BM25 keyword clause and a kNN vector clause, score-fused. The\n// product id is an exact token the keyword side matches; the vague sentence\n// is a vector the kNN side matches. Vector-only answers the sentence and\n// drops the id to nothing — the receipt lookup, which is the highest-intent\n// traffic, silently breaks.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the hybrid query from the snippets on the left, then Run. The\n# intercept returns the jacket for the sentence.\n#\n# The goal: one query with a keyword clause and a vector clause, so the id\n# and the sentence both work in the same box.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The hybrid query type fuses BM25 and kNN scores; OpenSearch needs a search\npipeline with a normalization processor for the fusion to be meaningful,\nwhich is infrastructure the search team already owns. The lesson is the\nshape: two clauses, two retrieval mechanisms, one result list. A vector-only\nstore (next step's refusal) cannot express the keyword clause at all, which\nis why it fails the id.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "opensearch",
+            "operation": "Search",
+            "body": {
+              "hits": {
+                "hits": [
+                  { "_source": { "sku": "JKT-4412", "title": "Coastline Waterproof Shell Jacket" } }
+                ]
+              }
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": {
+              "modelSummaries": [
+                { "modelId": "amazon.titan-embed-text-v2:0", "providerName": "Amazon", "modelName": "Titan Text Embeddings V2" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "S3 Vectors is refused here",
+      "decision": "Whether to move to S3 Vectors, the store you would pick with no hybrid need and no cluster to run, or keep the OpenSearch cluster that is already there.",
+      "why": "S3 Vectors is genuinely the right default for a greenfield vector workload: no cluster to operate, cheap at rest, managed. But it has no keyword side, and this catalog has two hard requirements it cannot meet — a hybrid of keyword and vector, and an existing OpenSearch cluster the search team keeps running. Choosing S3 Vectors here means re-adding keyword search on top of a store that has none, and abandoning a cluster that already works. The store is refused not because it is bad but because the requirements rule it out. Configuration: the lesson is naming when S3 Vectors wins and why it loses here.",
+      "snippets": [
+        {
+          "label": "What S3 Vectors is for — and the note that this catalog's hybrid requirement rules it out.",
+          "language": "typescript",
+          "source": "// S3 Vectors: the store for a greenfield vector workload with no cluster\n// to run and no keyword requirement.\n// Refused here: this catalog needs a keyword clause (the product id) and\n// already runs OpenSearch. A store with no keyword side fails the receipt\n// lookup. Keep OpenSearch.\nconst store = 'OPENSEARCH';"
+        }
+      ],
+      "infrastructure": "// S3 Vectors wins when the workload is vector-only and there is no cluster\n// to operate. This catalog is neither: the product id needs a keyword\n// clause, and OpenSearch is already running. Picking S3 Vectors would mean\n// rebuilding keyword search on a store that has none and abandoning a\n// working cluster. The store stays OpenSearch.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the store decision from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: name why S3 Vectors is refused here — no keyword side, and an\n// OpenSearch cluster already in place — and keep OpenSearch.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is the mirror of the policy assistant's 'managed knowledge base' step,\nwhich chose the managed default. Here the managed default (S3 Vectors) is\nrefused, and the reasoning is symmetric: pick the store the requirements\nfit, not the store that is fashionable. The hybrid requirement is the\ndisqualifier — S3 Vectors has no BM25 side — and the existing cluster is\nthe second. Either alone would be enough.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "store = 'OPENSEARCH'",
+            "present": true,
+            "message": "The store stays OpenSearch: it has the keyword side the product id needs and it is already running."
+          },
+          {
+            "pattern": "fails the receipt",
+            "present": true,
+            "message": "The reasoning is recorded: a store with no keyword side fails the receipt lookup, the Breaks when."
+          },
+          {
+            "pattern": "type: 'S3_VECTORS'",
+            "present": false,
+            "message": "S3 Vectors is not selected as the store. It is the right default for a greenfield vector-only workload, not for a hybrid catalog on an existing cluster."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Two chunk shapes for two document shapes",
+      "decision": "Whether one chunking rule covers both the short spec sheets and the long buying guides, or each shape gets its own.",
+      "why": "A product page is a short spec sheet; a buying guide is long prose. One chunking rule cannot serve both: fixed-size small enough for the spec sheet shreds the guide into fragments that lose the argument, and semantic chunking sized for the guide swallows a whole spec sheet into one undifferentiated blob. So the ingest branches on document type — fixed-size on the product pages, semantic on the guides. Configuration: the lesson is chunking by document shape, decided at ingest. The losing choice is one global rule applied to everything, which quietly degrades whichever shape it was not tuned for.",
+      "snippets": [
+        {
+          "label": "Branch the chunking on document type: fixed-size for spec sheets, semantic for guides.",
+          "language": "typescript",
+          "source": "function chunkStrategy(docType: string) {\n  return docType === 'guide'\n    ? { strategy: 'SEMANTIC', maxTokens: 600, breakpointPercentile: 95 }\n    : { strategy: 'FIXED_SIZE', maxTokens: 150, overlapTokens: 20 };\n}"
+        }
+      ],
+      "infrastructure": "// The ingest picks a chunking strategy by document shape. A spec sheet is\n// short and factual: fixed-size small chunks. A guide is long and\n// argumentative: semantic chunks that break on meaning. One global rule\n// shreds the guide or swallows the spec sheet; the branch keeps both\n// retrievable.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the per-type chunking from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: fixed-size on spec sheets, semantic on guides, chosen at ingest\n// by document type.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Chunking is a per-shape decision far more often than teams treat it. The\npolicy assistant used one strategy because its corpus was one shape\n(policies). This catalog is two shapes with opposite needs, so the ingest\nbranches. The symptom of getting it wrong is shape-specific: guides that\nretrieve as disconnected fragments (fixed-size too small) or spec sheets\nwhere every query returns the same giant blob (semantic too large).\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "SEMANTIC",
+            "present": true,
+            "message": "Semantic chunking on the long guides keeps an argument together across paragraphs."
+          },
+          {
+            "pattern": "FIXED_SIZE",
+            "present": true,
+            "message": "Fixed-size chunking on the short spec sheets keeps a fact retrievable without a whole sheet collapsing into one chunk."
+          },
+          {
+            "pattern": "docType === 'guide'",
+            "present": true,
+            "message": "The strategy branches on document type at ingest, so each shape gets the chunking it needs rather than one global rule."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Rerank for the item in third place",
+      "decision": "What to do when the right item is in the result list but ranked third — swap the embedding model, or rerank the candidates.",
+      "why": "The jacket is already retrieved; it is just in third place behind two near-matches. That is not an embedding problem — the retrieval found it — so swapping the embedding model is the wrong fix, an expensive rebuild that does not address ranking. A reranker (a cross-encoder like Cohere Rerank on Bedrock) takes the top candidates and the query together and reorders them by relevance, promoting the jacket to first. This is runnable: the rerank call reorders the candidates and the jacket comes first. The losing move is treating third-place as a retrieval failure and rebuilding the index, when the retrieval already succeeded.",
+      "snippets": [
+        {
+          "label": "The candidates from the first-pass search, in the wrong order. The right jacket is third.",
+          "language": "python",
+          "source": "import boto3\n\nbedrock = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nQUERY = \"blue waterproof jacket under 120\"\ncandidates = [\n    \"Navy rain poncho, one size\",\n    \"Blue windbreaker, not waterproof\",\n    \"Coastline Waterproof Shell Jacket, blue\",  # the right one, third\n]"
+        },
+        {
+          "label": "Rerank the candidates against the query. A cross-encoder scores query+doc together, so the jacket moves to first.",
+          "language": "python",
+          "source": "out = bedrock.invoke_model(\n    modelId=\"cohere.rerank-v3-5:0\",\n    body=json.dumps({\"query\": QUERY, \"documents\": candidates, \"top_n\": 3}),\n)\nranked = json.loads(out[\"body\"].read())\nfor r in ranked[\"results\"]:\n    print(r[\"index\"], r[\"relevance_score\"], candidates[r[\"index\"]])"
+        },
+        {
+          "label": "From the terminal, confirm the rerank model is available in the Region before wiring it in — a model not enabled is an access error, not a bad call.",
+          "language": "shell",
+          "source": "aws bedrock get-foundation-model --model-identifier cohere.rerank-v3-5:0"
+        }
+      ],
+      "infrastructure": "// Rerank is the fix for 'the right item is in the list, in the wrong\n// place.' The first-pass retrieval already found the jacket; a\n// cross-encoder reorders the top candidates by scoring query and document\n// together. Swapping the embedding model is a rebuild that does not touch\n// ranking — the wrong fix for a ranking problem.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the rerank call from the snippets on the left, then Run. The\n# intercept returns the candidates reordered, the jacket first.\n#\n# The goal: reorder candidates that were already retrieved, rather than\n# rebuilding the index for a ranking problem.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The distinction is retrieval vs ranking. Retrieval decides which documents\nare candidates; ranking decides their order. Third place means retrieval\nsucceeded and ranking is weak — a reranker fixes ranking directly. A new\nembedding model changes which documents are candidates, which is a fix for\na recall problem (the right item not retrieved at all), not a precision-at-1\nproblem. Reaching for a re-embed here is expensive and off-target.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "InvokeModel",
+            "body": {
+              "results": [
+                { "index": 2, "relevance_score": 0.91 },
+                { "index": 1, "relevance_score": 0.44 },
+                { "index": 0, "relevance_score": 0.12 }
+              ]
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "GetFoundationModel",
+            "body": {
+              "modelDetails": {
+                "modelId": "cohere.rerank-v3-5:0",
+                "providerName": "Cohere",
+                "modelName": "Rerank 3.5",
+                "modelLifecycle": { "status": "ACTIVE" }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Rewrite the vague query, HyDE the alien one",
+      "decision": "What to do with a question that shares no words with the catalog — rewrite it toward catalog vocabulary, or generate a hypothetical document to search with.",
+      "why": "'Something for a wet commute that packs small' names no product and shares no words with any title. Two tools, two situations. Query rewrite rephrases the question into catalog vocabulary ('lightweight packable waterproof jacket') so the keyword side has something to match. HyDE goes further for a question that looks nothing like any title: the model writes a hypothetical product description answering the question, and you search with that document's embedding, because a fake answer is closer to the real answer than the question is. This is runnable: the rewrite returns catalog words. The losing move is searching the raw vague sentence and returning noise.",
+      "snippets": [
+        {
+          "label": "Rewrite the vague question into catalog vocabulary, so the keyword clause has words to match.",
+          "language": "python",
+          "source": "import boto3, json\n\nbedrock = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nVAGUE = \"something for a wet commute that packs small\"\nrewrite = bedrock.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": f\"Rewrite as catalog search terms: {VAGUE}\"}]}],\n    inferenceConfig={\"maxTokens\": 64},\n)\nterms = rewrite[\"output\"][\"message\"][\"content\"][0][\"text\"]\nprint(terms)"
+        },
+        {
+          "label": "From the terminal, list the models so you confirm the Converse model id is one you can call in this Region.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+        }
+      ],
+      "infrastructure": "// Query rewrite for a vague question: rephrase it into catalog words so the\n// keyword clause matches. HyDE for an alien question: the model writes a\n// hypothetical product description and you search with its embedding,\n// because a plausible answer is nearer the real answer than the question\n// is. Searching the raw vague sentence returns noise.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the query rewrite from the snippet on the left, then Run. The\n# intercept returns catalog-vocabulary search terms.\n#\n# The goal: turn a vague sentence into words the catalog actually uses,\n# before it reaches the search.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Rewrite and HyDE are a ladder. Rewrite is cheap and enough when the\nquestion is just phrased in everyday words — map 'wet commute' to\n'waterproof, packable.' HyDE is for the question that resembles no title at\nall: generate a fake ideal product page, embed THAT, and search. The\ntradeoff is a model call on the query path, so it is reserved for the vague\ntail, not every search. An exact product id never goes near either — it\ngoes straight to the keyword clause.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": { "message": { "role": "assistant", "content": [ { "text": "lightweight packable waterproof commuter jacket" } ] } },
+              "stopReason": "end_turn"
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": {
+              "modelSummaries": [
+                { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Deduplicate the near-copy seller pages",
+      "decision": "Whether five near-identical seller descriptions all go into the prompt, or they are collapsed to one before ranking.",
+      "why": "Marketplace sellers paste near-copies of the same description. Five identical-ish pages are not five pieces of evidence — they are one, repeated, and if they all fill the context they crowd out the genuinely different results and bias the model toward the duplicated claim. Dedup collapses near-copies before they reach the prompt, by a similarity threshold on the candidate embeddings or a shingled-text hash, keeping one representative. Configuration: the lesson is dedup before the prompt. The losing choice is letting the top-k be five copies of one listing, which wastes the context window and misleads the ranking.",
+      "snippets": [
+        {
+          "label": "Collapse near-duplicate candidates before they fill the prompt. Keep one representative per cluster.",
+          "language": "typescript",
+          "source": "// Before assembling the prompt, cluster candidates by embedding similarity\n// and keep one per cluster.\nconst DEDUP_THRESHOLD = 0.95; // cosine; above this, treat as the same listing\nfunction dedupe(candidates: Candidate[]): Candidate[] {\n  // one representative per near-duplicate cluster\n  return collapseByCosine(candidates, DEDUP_THRESHOLD);\n}"
+        }
+      ],
+      "infrastructure": "// Near-copy seller pages are deduplicated before the prompt. Five pasted\n// variants of one description are one piece of evidence, not five; letting\n// them fill the context crowds out different results and biases ranking\n// toward the repeated claim. Collapse by embedding similarity, keep one\n// representative.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the dedup step from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: near-copy seller pages collapse to one representative before\n// the prompt, so duplicates do not crowd out different results.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Dedup sits between retrieval and the prompt, a cheap but easily-skipped\nstage. The threshold is a judgment: too high and genuine variants of a real\nproduct line get collapsed; too low and near-copies slip through. Shingled\ntext hashing is the cheaper first pass; embedding-cosine catches\nreworded-but-identical listings the hash misses. The cost of skipping it is\na context window full of the same claim five times.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "DEDUP_THRESHOLD",
+            "present": true,
+            "message": "Near-copies are collapsed by a similarity threshold, so five pasted variants become one piece of evidence."
+          },
+          {
+            "pattern": "collapseByCosine",
+            "present": true,
+            "message": "Dedup runs on the candidates before the prompt, keeping one representative per near-duplicate cluster."
+          },
+          {
+            "pattern": "one representative per near-duplicate cluster",
+            "present": true,
+            "message": "One representative per near-duplicate cluster reaches the prompt, so duplicates do not crowd out genuinely different results or bias the ranking."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Event-driven ingest from the product bus",
+      "decision": "Whether the index is rebuilt on a schedule, or updated by events from the product bus as prices and stock change.",
+      "why": "Prices and availability change through the day on the product bus. A nightly rebuild serves this morning's discontinued sku until tonight — a shopper is offered something that is gone. Event-driven ingest subscribes to the bus: a product update event updates that document, a discontinue event removes it, within minutes. The index tracks the catalog instead of lagging a day behind it. Configuration: the lesson is the event subscription, not the cron. The losing choice is the scheduled rebuild, which guarantees a window where the index and the catalog disagree — and a guide unpublished this morning must be gone tonight (Done means), which a daily job cannot promise.",
+      "snippets": [
+        {
+          "label": "Subscribe the ingest to the product bus. An update event updates the doc; a discontinue event removes it.",
+          "language": "typescript",
+          "source": "new Rule(this, 'CatalogUpdates', {\n  eventBus: productBus,\n  eventPattern: { detailType: ['ProductUpdated', 'ProductDiscontinued'] },\n  targets: [new LambdaFunction(ingestFn)],\n});"
+        }
+      ],
+      "infrastructure": "// Event-driven ingest off the product bus: ProductUpdated reindexes the\n// document, ProductDiscontinued removes it, within minutes. A nightly\n// rebuild serves this morning's discontinued sku until tonight — the index\n// lags the catalog by up to a day, and a shopper is offered what is gone.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the event rule from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the index tracks the product bus event-by-event, so a\n// discontinued sku leaves the index in minutes, not at the next rebuild.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Same event-driven-vs-scheduled decision as the policy assistant's ingest\nstep, with a retail urgency: stock and price move intraday, so the lag of a\nnightly job is customer-visible (an out-of-stock result) rather than merely\nstale. ProductDiscontinued must delete the vectors, not just stop updating\nthem — a retained vector keeps a dead sku retrievable, the same\nstale-answer failure in a catalog.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "ProductUpdated",
+            "present": true,
+            "message": "A product-updated event reindexes the document, so a price or stock change is reflected within minutes."
+          },
+          {
+            "pattern": "ProductDiscontinued",
+            "present": true,
+            "message": "A discontinue event removes the document, so a dead sku leaves the index rather than lingering until a rebuild."
+          },
+          {
+            "pattern": "eventBus: productBus",
+            "present": true,
+            "message": "The ingest subscribes to the product bus, so the index tracks the catalog event-by-event instead of lagging a nightly job."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Filter the store region before similarity",
+      "decision": "Whether the store-region filter runs before the similarity search or after, so a US shopper is never offered an EU-only sku.",
+      "why": "A shopper in the US store must not be offered an EU-only sku, however well it matches. The region filter runs before ranking: the kNN and keyword clauses search only documents whose store region includes the shopper's store, so the EU-only sku is never a candidate. Filter after and the EU sku was retrieved, scored, and is one display bug away from being shown. Closeness does not override which store the shopper is in. Configuration: the lesson is the pre-filter on store region. The losing choice is a post-filter that trusts the result list to be scrubbed before display.",
+      "snippets": [
+        {
+          "label": "The region filter is a clause in the query, ANDed with the hybrid search. The EU-only sku is not a candidate.",
+          "language": "typescript",
+          "source": "const regionFilter = {\n  bool: {\n    filter: [{ term: { store_region: '$shopperRegion' } }],\n    must: [/* the hybrid keyword + knn clauses */],\n  },\n};\n// store_region is indexed per document; the filter runs before scoring."
+        }
+      ],
+      "infrastructure": "// The store-region filter is a bool filter clause ANDed with the hybrid\n// query, so OpenSearch restricts the candidate set before scoring. An\n// EU-only sku is excluded from the search, not retrieved and scrubbed\n// afterward. A post-filter trusts application code to strip it from the\n// list before display, which is one bug away from showing it.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the region filter from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: store_region filters before the hybrid search scores, so a US\n// shopper never has an EU-only sku as a candidate.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Same 'filter before similarity' discipline as the policy assistant's\ndepartment filter and the contract desk's client filter — a recurring exam\npattern. In OpenSearch the filter clause of a bool query restricts the set\nthe must clauses score, so it is genuinely pre-scoring, not a re-rank. The\nstore_region field has to be on every document, or a missing value drops a\nvalid sku silently, the same missing-key trap as the policy sidecar.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "store_region",
+            "present": true,
+            "message": "The store-region filter restricts candidates to the shopper's store before scoring, so an EU-only sku is never retrieved for a US shopper."
+          },
+          {
+            "pattern": "filter: [",
+            "present": true,
+            "message": "The region is a bool filter clause, which OpenSearch applies before the must clauses score — genuinely pre-similarity, not a re-rank."
+          },
+          {
+            "pattern": "post_filter",
+            "present": false,
+            "message": "No post_filter scrubbing the result list. A post-filter means the EU sku was retrieved and scored, one display bug away from being shown."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "overrideSearchType only on a store that has keyword",
+      "decision": "Whether overrideSearchType is a flag you can set anywhere, or one that only means something on a store with a keyword side.",
+      "why": "overrideSearchType=HYBRID tells the Retrieve API to run both the keyword and vector sides and fuse them. It is meaningful here precisely because OpenSearch has a keyword side to override toward. On a store with no keyword mechanism — S3 Vectors, a pure vector index — the flag has nothing to switch to: there is no BM25 pass to combine, so setting it is either ignored or an error, and a reviewer who copied it from a hybrid example is cargo-culting. Configuration: the lesson is that the flag is a property of the store's capability, not a universal switch. The losing move is pasting overrideSearchType onto a vector-only store and expecting hybrid behavior that the store cannot provide.",
+      "snippets": [
+        {
+          "label": "overrideSearchType is set because this store supports hybrid. It is not a flag you paste onto a vector-only store.",
+          "language": "typescript",
+          "source": "const retrievalConfig = {\n  vectorSearchConfiguration: {\n    overrideSearchType: 'HYBRID', // valid: OpenSearch has a keyword side\n  },\n};\n// On S3 Vectors there is no keyword side to override toward, so this flag\n// means nothing there."
+        }
+      ],
+      "infrastructure": "// overrideSearchType HYBRID is meaningful only on a store with a keyword\n// side to fuse — OpenSearch has one. On a vector-only store the flag has\n// nothing to switch to; it is ignored or errors. It is a property of the\n// store's capability, not a universal switch, and pasting it onto S3\n// Vectors is cargo-culting a hybrid example.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the retrieval config from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: overrideSearchType HYBRID is set here because OpenSearch\n// supports it, and understood as store-dependent, not universal.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This step closes the loop with step 3's refusal of S3 Vectors: the same\ncapability gap (no keyword side) that disqualified the store also makes\nthis flag meaningless there. The flag is a knowledge-base Retrieve setting;\nit presumes the underlying store can do both retrievals. Recognizing that a\nconfiguration option is a function of the store's capabilities, not a free\nswitch, is the transferable lesson.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "overrideSearchType: 'HYBRID'",
+            "present": true,
+            "message": "overrideSearchType HYBRID is set because OpenSearch has a keyword side to fuse with the vector side."
+          },
+          {
+            "pattern": "OpenSearch has a keyword side",
+            "present": true,
+            "message": "The flag is justified by the store's capability. It is meaningful here because there is a keyword pass to override toward."
+          },
+          {
+            "pattern": "means nothing there",
+            "present": true,
+            "message": "On a vector-only store the flag has nothing to switch to. It is store-dependent, not a universal switch pasted from a hybrid example."
+          }
+        ]
+      }
+    }
+  ]
+}

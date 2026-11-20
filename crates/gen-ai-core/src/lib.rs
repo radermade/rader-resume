@@ -27,9 +27,21 @@ pub use scenario::{
 /// A slice of sources rather than a directory read: the handler must not touch
 /// a file system at request time, and a missing document should fail the build
 /// rather than a request.
-const SOURCES: &[&str] = &[include_str!(
-    "../../../content/gen-ai/policy-assistant.json"
-)];
+const SOURCES: &[&str] = &[
+    include_str!("../../../content/gen-ai/policy-assistant.json"),
+    include_str!("../../../content/gen-ai/case-graph.json"),
+    include_str!("../../../content/gen-ai/employee-answers.json"),
+    include_str!("../../../content/gen-ai/contract-desk.json"),
+    include_str!("../../../content/gen-ai/product-catalog-search.json"),
+    include_str!("../../../content/gen-ai/member-services.json"),
+    include_str!("../../../content/gen-ai/benefits-agent.json"),
+    include_str!("../../../content/gen-ai/desk-router.json"),
+    include_str!("../../../content/gen-ai/overnight-claims.json"),
+    include_str!("../../../content/gen-ai/support-chat.json"),
+    include_str!("../../../content/gen-ai/clinical-intake.json"),
+    include_str!("../../../content/gen-ai/brand-voice.json"),
+    include_str!("../../../content/gen-ai/analyst-workspace.json"),
+];
 
 /// Parses every scenario, in catalog order.
 ///
@@ -62,6 +74,35 @@ mod tests {
                 out.push('_');
             }
             out.push(ch.to_ascii_lowercase());
+        }
+        out
+    }
+
+    /// The CLI form of an operation: the botocore operation name in kebab-case,
+    /// as the `aws` command uses it. `GetKnowledgeBase` -> `get-knowledge-base`,
+    /// and an acronym run is one word the way the CLI renders it:
+    /// `DescribeDBClusters` -> `describe-db-clusters`, not `describe-d-b-clusters`.
+    /// A boundary is inserted before a capital that begins a new word — a
+    /// capital followed by a lowercase, or the last capital of a run before a
+    /// lowercase — matching how the AWS CLI hyphenates operation names. A
+    /// terminal (`shell`) snippet teaches an operation this way, so the
+    /// reachability test accepts it alongside the python method form.
+    #[cfg(test)]
+    fn pascal_to_kebab(op: &str) -> String {
+        let chars: Vec<char> = op.chars().collect();
+        let mut out = String::new();
+        for i in 0..chars.len() {
+            let c = chars[i];
+            if i > 0 && c.is_uppercase() {
+                let prev = chars[i - 1];
+                let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+                // Boundary when leaving a lowercase run (aB), or when the last
+                // capital of an acronym run starts a new lowercase word (BCluster).
+                if prev.is_lowercase() || next_lower {
+                    out.push('-');
+                }
+            }
+            out.push(c.to_ascii_lowercase());
         }
         out
     }
@@ -186,15 +227,21 @@ mod tests {
                 // A lowercase-only transform would miss the multi-word ones,
                 // so insert an underscore before each interior capital.
                 for response in &bench.responses {
+                    // An operation is taught either as a python method the
+                    // visitor assembles (`.get_knowledge_base(`) or as the CLI
+                    // form in a terminal snippet (`get-knowledge-base`). The
+                    // terminal runs against the same intercept, so a response
+                    // reached only through the shell is still reached.
                     let method = pascal_to_snake(&response.operation);
-                    let taught = call
-                        .snippets
-                        .iter()
-                        .any(|snippet| snippet.source.contains(&format!(".{method}(")));
+                    let cli = pascal_to_kebab(&response.operation);
+                    let taught = call.snippets.iter().any(|snippet| {
+                        snippet.source.contains(&format!(".{method}("))
+                            || snippet.source.contains(&cli)
+                    });
 
                     assert!(
                         taught,
-                        "{} intercepts {}.{} but no snippet calls it",
+                        "{} intercepts {}.{} but no snippet (python or terminal) calls it",
                         call.title, response.service, response.operation
                     );
                 }
@@ -425,9 +472,20 @@ mod tests {
             for step in &scenario.steps {
                 let Some(call) = step.as_call() else { continue };
 
+                // Checks grade the .ts buffer of the single editor, which the
+                // visitor fills from the typescript snippets. On a pure config
+                // step every snippet is the config artifact; on a step that is
+                // both runnable and checked, the python snippets feed the .py
+                // file and only the typescript ones feed the .ts file the
+                // checks verify. So match against the typescript snippets when
+                // any exist, and fall back to all snippets for a config step
+                // authored before the language tags (none remain, but the
+                // fallback is cheap).
+                let has_ts = call.snippets.iter().any(|s| s.language == "typescript");
                 let assembled = call
                     .snippets
                     .iter()
+                    .filter(|s| !has_ts || s.language == "typescript")
                     .map(|s| s.source.as_str())
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -452,6 +510,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_step_with_both_languages_seeds_both_files_for_the_single_editor() {
+        // The worked case the single editor is built for: a step that both
+        // runs a call (has responses) and carries an answer key (has checks),
+        // seeding both a .py file and a .ts file. The single editor tracks
+        // both; the action button follows whichever is open — Run on the .py,
+        // Check on the .ts. `every_embedded_scenario_parses` already proves the
+        // guards accept it; this documents what a both-languages step is and
+        // fails loudly if the worked example is removed or broken.
+        let catalog = catalog().unwrap();
+
+        let step = catalog
+            .iter()
+            .flat_map(|s| &s.steps)
+            .filter_map(|s| s.as_call())
+            .find(|c| {
+                c.is_runnable()
+                    && !c.workbench.checks.is_empty()
+                    && c.workbench.files.iter().any(|f| f.path.ends_with(".py"))
+                    && c.workbench.files.iter().any(|f| f.path.ends_with(".ts"))
+            })
+            .expect("a worked both-languages step exists in the catalog");
+
+        assert!(step.is_runnable(), "it runs a call");
+        assert!(
+            !step.workbench.checks.is_empty(),
+            "it carries an answer key for the .ts buffer"
+        );
+        // Both files are seeded so the single editor can switch between them.
+        assert!(
+            step.workbench.files.iter().any(|f| f.path.ends_with(".py")),
+            "a .py file is seeded for the Run half"
+        );
+        assert!(
+            step.workbench.files.iter().any(|f| f.path.ends_with(".ts")),
+            "a .ts file is seeded for the Check half"
+        );
+        assert!(
+            step.snippets.iter().any(|s| s.language == "python"),
+            "python to assemble into the .py file"
+        );
+        assert!(
+            step.snippets.iter().any(|s| s.language == "typescript"),
+            "typescript to assemble into the .ts file"
+        );
     }
 
     #[test]

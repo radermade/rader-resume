@@ -1,0 +1,423 @@
+{
+  "schemaVersion": 1,
+  "id": "contract-desk",
+  "name": "Contract desk",
+  "summary": "Clause-level answers inside the matter a firm already has open, where quoting another client's contract is the failure that ends the product.",
+  "brief": {
+    "whoIsAsking": "An associate in an open matter asking 'does the 2024 Northwind MSA allow termination for convenience, and does the SOW signed in March narrow that,' needing the governing clauses and the playbook rule that compares them.",
+    "whatTheyNeedBack": "The two governing clauses and the playbook rule, each cited by clause id. A fluent summary with no clause is useless in a markup.",
+    "systemsAlreadyRunning": "An Aurora PostgreSQL database already holds client, matter, the clause library, and each signed document's effective date. Credentials live in Secrets Manager. The firm will not stand up OpenSearch beside it.",
+    "breaksWhen": "A clause belonging to another client is quoted into a markup. That is a confidentiality incident rather than a relevance bug, and it ends the product instead of degrading it.",
+    "doneMeans": "An associate in the Northwind matter gets the two governing clauses and the playbook rule that compares them, each cited, and a query for a different client returns none of those rows."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "vpc", "label": "VPC" }
+        ],
+        "nodes": [
+          { "id": "associate", "label": "Associate", "flowsTo": ["gateway"] },
+          { "id": "gateway", "label": "API Gateway", "icon": "api-gateway", "flowsTo": ["lambda"] },
+          { "id": "lambda", "label": "AWS Lambda", "icon": "lambda", "group": "vpc", "flowsTo": ["aurora", "secrets", "bedrock"] },
+          { "id": "aurora", "label": "Aurora PostgreSQL (pgvector)", "group": "vpc" },
+          { "id": "secrets", "label": "Secrets Manager", "icon": "iam", "group": "vpc" },
+          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "pgvector on the matter database",
+      "decision": "Whether the clause embeddings live in a new vector store, or in the Aurora database that already holds the client, the matter, and the effective date.",
+      "why": "The firm's trust is in Aurora: client, matter, clause library, and each document's effective date are already there, joined and consistent. A second vector store splits the embedding from those columns — now the clause lives in one system and the client it belongs to lives in another, and keeping them in sync is a job nobody signed up for. pgvector puts the embedding in a column beside the clause, so the filter on client and effective date is a SQL WHERE, not a cross-system reconciliation. The losing choice is a standalone vector store that cannot join to the matter it belongs to — and a clause that drifts loose from its client is how another client's contract gets quoted, the Breaks when. Configuration: the lesson is the extension on the existing database.",
+      "snippets": [
+        {
+          "label": "pgvector on the existing Aurora cluster. The embedding is a column beside the clause, not a second store.",
+          "language": "typescript",
+          "source": "// On the Aurora PostgreSQL cluster the firm already runs:\n//   CREATE EXTENSION IF NOT EXISTS vector;\n//   ALTER TABLE clause ADD COLUMN embedding vector(1024);\n// The clause, its client, its matter, and its effective_date are the same\n// row. The filter is a WHERE, not a cross-system join.\nconst enablePgvector = 'CREATE EXTENSION IF NOT EXISTS vector;';"
+        }
+      ],
+      "infrastructure": "// The embedding lives in a vector column on the clause table in the Aurora\n// database that already holds client, matter, and effective_date. A second\n// vector store would split the clause from the columns you trust, and a\n// clause drifting loose from its client is how another client's contract\n// gets quoted. pgvector keeps them one row.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the pgvector enablement from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the clause embedding is a column on the clause row in Aurora,\n// so client and effective_date filter it with a WHERE, not a second store.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The pull toward a dedicated vector store is strong because it is what the\nother scenarios use. Here it is wrong: the value is the join. client,\nmatter, effective_date, and the clause text are already one trustworthy\nrow, and the embedding belongs in that row. Splitting it out trades a SQL\nWHERE for a distributed-consistency problem, and the failure mode of that\nproblem is a cross-client quote.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CREATE EXTENSION IF NOT EXISTS vector",
+            "present": true,
+            "message": "pgvector is enabled on the existing Aurora cluster, so the embedding is a column beside the clause rather than a separate store."
+          },
+          {
+            "pattern": "vector(1024)",
+            "present": true,
+            "message": "The embedding column has an explicit dimension, declared on the row that already carries the client and the effective date."
+          },
+          {
+            "pattern": "OpenSearch",
+            "present": false,
+            "message": "No second store beside Aurora. A standalone vector store splits the clause from the client it belongs to — the drift that lets another client's contract be quoted."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The embedding dimension matches the column",
+      "decision": "Whether the embedding model's width is pinned to the vector column's dimension, and what a model change means for that column.",
+      "why": "The vector column was declared at a fixed width — vector(1024) for Titan v2. The embedding model must write exactly that width, or the insert fails on the dimension. The deeper trap is a silent one: changing the model later writes vectors of a different meaning into the same column, mixing two spaces so 'nearest' stops being nearest. A model change is a column rebuild — re-embed every clause, not a config swap. Configuration: the lesson is the model and the column agreeing, and the rebuild discipline. The losing move is treating the embedding model as a setting you can flip, which for a contract corpus means silently wrong clause matches in a markup.",
+      "snippets": [
+        {
+          "label": "The model and the column width, declared together so an insert cannot write the wrong shape.",
+          "language": "typescript",
+          "source": "const EMBED_MODEL = 'amazon.titan-embed-text-v2:0';\nconst EMBED_DIM = 1024; // must equal the vector(1024) column width\n// A model change is: re-embed every clause, replace the column, THEN query."
+        }
+      ],
+      "infrastructure": "// The embedding model width and the vector column dimension are one\n// decision. A width mismatch fails the insert loudly; a model change that\n// keeps the width but changes the space fails silently, mixing two\n// meanings in one column. Either way a model change is a re-embed of every\n// clause, not a setting flip.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the model-and-dimension declaration from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: the embedding model width equals the vector column dimension,\n// and a model change is understood as a re-embed, not a setting.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Same lesson as the policy assistant's embedding step and the case graph's\nrebuild step, in a SQL column this time. The width mismatch is the loud\nfailure (insert rejected on dimension). The space mismatch is the quiet\none: the column still accepts the vectors, the query still runs, and the\nmatches are quietly wrong — which in a contract markup is a clause quoted\nbecause two embedding spaces happened to land near each other.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "titan-embed-text-v2",
+            "present": true,
+            "message": "One named embedding model writes the clause vectors. Query and stored vectors must come from the same model and space."
+          },
+          {
+            "pattern": "EMBED_DIM = 1024",
+            "present": true,
+            "message": "The model width is pinned to the vector(1024) column. A mismatch fails the insert on dimension rather than at query time."
+          },
+          {
+            "pattern": "re-embed every clause",
+            "present": true,
+            "message": "A model change is a column rebuild, not a config swap. Mixing two embedding spaces in one column makes 'nearest' quietly wrong."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Database credentials in Secrets Manager",
+      "decision": "Where the Aurora credentials live, and whether the Lambda reads them from a secret or carries them as an environment string.",
+      "why": "A connection string in the Lambda environment is a credential in plaintext: it shows up in the console, in a describe-function call, and in the ticket where someone pasted the config to ask for help. Secrets Manager holds the credential, the Lambda reads it at init with the database's own rotation behind it, and the environment carries only the secret's ARN. The rotation is the database's, not a new secret you minted and now have to rotate yourself. Configuration: the lesson is the secret reference and the absence of a plaintext credential. The losing choice is the env-var connection string — convenient until it is in a screenshot.",
+      "snippets": [
+        {
+          "label": "The Lambda is granted read on the specific secret, and the connection reads it at init. The env carries the ARN, not the password.",
+          "language": "typescript",
+          "source": "dbSecret.grantRead(handler);\nhandler.addEnvironment('DB_SECRET_ARN', dbSecret.secretArn);\n// At init: client = secretsmanager.get_secret_value(SecretId=arn)\n// The password is never an environment variable."
+        }
+      ],
+      "infrastructure": "// Secrets Manager holds the Aurora credential with the database's own\n// rotation. The Lambda is granted read on the one secret and fetches it at\n// cold start; the environment carries only the ARN. A connection string in\n// the environment is a plaintext credential that leaks into a describe call\n// and a pasted ticket.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the secret wiring from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the Lambda reads the Aurora credential from Secrets Manager at\n// init, and the environment holds the ARN, never the password.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The failure here is not dramatic, it is mundane and common: a DATABASE_URL\nwith the password in it, set as an environment variable because it was the\nfastest way to connect. It survives review because it works. Then it is in\na Lambda describe-function output, a CloudTrail event, a Slack paste. The\nsecret reference costs one get_secret_value at init and removes the whole\nclass of leak. Rotation stays the database's job, not a second thing to\nmanage.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "grantRead(handler)",
+            "present": true,
+            "message": "The Lambda is granted read on the specific secret, so it fetches the credential at init rather than carrying it."
+          },
+          {
+            "pattern": "DB_SECRET_ARN",
+            "present": true,
+            "message": "The environment holds the secret's ARN, not the password. The credential is resolved at runtime from Secrets Manager."
+          },
+          {
+            "pattern": "DB_PASSWORD",
+            "present": false,
+            "message": "No plaintext password in the environment. An env-var credential leaks into describe-function output and pasted tickets — the mundane, common leak this avoids."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Filter client and date before similarity",
+      "decision": "Whether the client and effective-date filters run as a SQL WHERE before the vector search, or as a re-rank after it.",
+      "why": "This is the step the whole product turns on. The SQL WHERE restricts to this client and to documents effective as of today, and the vector similarity runs only over those rows. A clause from another client, however semantically close, is never a candidate, because it was filtered out before the distance was computed. Running similarity first and filtering after is the cross-client quote waiting to happen: the other client's clause was retrieved, held, and one slip puts it in the markup. 'Close' is not a reason to quote another client's contract. This is runnable: the filtered query returns only Northwind's current clauses.",
+      "snippets": [
+        {
+          "label": "The connection, from the secret. psycopg over the Aurora cluster, credentials never inline.",
+          "language": "python",
+          "source": "import boto3, json, psycopg\n\nsm = boto3.client(\"secretsmanager\", region_name=\"eu-central-1\")\ncreds = json.loads(sm.get_secret_value(SecretId=\"contract-db\")[\"SecretString\"])\nconn = psycopg.connect(host=creds[\"host\"], user=creds[\"username\"], password=creds[\"password\"], dbname=\"matters\")\n\nCLIENT = \"northwind\"\nQUESTION = \"termination for convenience\""
+        },
+        {
+          "label": "The WHERE runs before the ORDER BY similarity. Another client's clause is not a candidate, not a re-ranked-away result.",
+          "language": "python",
+          "source": "q = (\n    \"SELECT clause_id, text FROM clause \"\n    \"WHERE client = %s AND effective_date <= CURRENT_DATE \"\n    \"ORDER BY embedding <=> %s LIMIT 5\"\n)\nwith conn.cursor() as cur:\n    cur.execute(q, (CLIENT, query_embedding))\n    for clause_id, text in cur.fetchall():\n        print(clause_id, text)"
+        },
+        {
+          "label": "From the terminal, confirm the secret the query depends on resolves — describe-secret shows it exists and rotates, without printing the password.",
+          "language": "shell",
+          "source": "aws secretsmanager describe-secret --secret-id contract-db"
+        }
+      ],
+      "infrastructure": "// The client and effective_date filters are a SQL WHERE evaluated before\n// the similarity ORDER BY. Another client's clause is excluded from the\n// candidate set, not retrieved and re-ranked away. Filtering after\n// similarity means the other client's text was already in hand, and one\n// slip quotes it — the confidentiality incident that ends the product.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the filtered clause query from the snippets on the left, then\n# Run. The intercept resolves the secret and returns only Northwind's\n# current clauses.\n#\n# The goal: client and effective_date filter BEFORE similarity, so another\n# client's clause is never a candidate.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The <=> operator is pgvector's cosine distance; ORDER BY embedding <=> q\nis the nearest-neighbour search. The load-bearing word is WHERE, and that\nit runs first: Postgres filters, then ranks the survivors. Compare the\nlosing shape — ORDER BY similarity LIMIT 50, then filter the 50 in Python —\nwhich pulls other clients' clauses into memory and trusts application code\nnot to leak them. effective_date <= CURRENT_DATE drops the 2022 agreement\nthat is still in the table but no longer governs.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "secretsmanager",
+            "operation": "GetSecretValue",
+            "body": {
+              "SecretString": "{\"host\": \"contract-db.cluster-abc.eu-central-1.rds.amazonaws.com\", \"username\": \"desk\", \"password\": \"redacted-in-lab\", \"dbname\": \"matters\"}"
+            }
+          },
+          {
+            "service": "secretsmanager",
+            "operation": "DescribeSecret",
+            "body": {
+              "ARN": "arn:aws:secretsmanager:eu-central-1:111122223333:secret:contract-db-AbCdEf",
+              "Name": "contract-db",
+              "RotationEnabled": true,
+              "RotationRules": { "AutomaticallyAfterDays": 30 }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Decompose the multi-document question",
+      "decision": "Whether a question spanning two documents under a third is embedded whole, or decomposed so each part is retrieved on its own.",
+      "why": "The associate's question is really three retrievals: the MSA's termination clause, the SOW's narrowing clause, and the playbook rule that says which wins. Embed the whole sentence and the vector is the average of three documents — it points near none of them, and the search returns a muddle. Decompose it: retrieve the MSA clause, retrieve the SOW clause, retrieve the governing playbook rule for this client, then merge. Each sub-retrieval is sharp because it is one idea. This is runnable: the decomposed retrieval returns the two clauses and the playbook rule, each cited. The losing shape is the single embedding that averages three documents into zero.",
+      "snippets": [
+        {
+          "label": "The connection, from the secret. Same pattern as the filtered-query step: credentials from Secrets Manager, never inline.",
+          "language": "python",
+          "source": "import boto3, json, psycopg\n\nsm = boto3.client(\"secretsmanager\", region_name=\"eu-central-1\")\ncreds = json.loads(sm.get_secret_value(SecretId=\"contract-db\")[\"SecretString\"])\nconn = psycopg.connect(host=creds[\"host\"], user=creds[\"username\"], password=creds[\"password\"], dbname=\"matters\")\n\nCLIENT = \"northwind\""
+        },
+        {
+          "label": "Decompose into the three retrievals the question actually is, each a single idea.",
+          "language": "python",
+          "source": "parts = [\n    \"MSA termination for convenience clause\",\n    \"SOW clause narrowing termination\",\n    \"playbook rule: which clause governs on conflict\",\n]\n# One embedding of the whole question averages these three into none of them."
+        },
+        {
+          "label": "Retrieve each part under the same client filter, then merge. The playbook is retrieved, not a system prompt.",
+          "language": "python",
+          "source": "cited = []\nfor part in parts:\n    emb = embed(part)\n    with conn.cursor() as cur:\n        cur.execute(\n            \"SELECT clause_id, text FROM clause \"\n            \"WHERE client = %s ORDER BY embedding <=> %s LIMIT 1\",\n            (CLIENT, emb),\n        )\n        cited.append(cur.fetchone())\nfor clause_id, text in cited:\n    print(clause_id, text)"
+        },
+        {
+          "label": "From the terminal, confirm the Aurora cluster the query runs against is available — describe-db-clusters shows its status before you blame the SQL.",
+          "language": "shell",
+          "source": "aws rds describe-db-clusters --db-cluster-identifier contract-db"
+        }
+      ],
+      "infrastructure": "// A multi-document question is several retrievals, not one. Embedding the\n// whole sentence averages the MSA clause, the SOW clause, and the playbook\n// rule into a vector near none of them. Decompose, retrieve each under the\n// client filter, merge the cited results. The playbook is retrieved for\n// this client, never pasted into the system prompt.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the decomposed retrieval from the snippets on the left, then\n# Run. The intercept returns the two clauses and the playbook rule.\n#\n# The goal: three sharp retrievals merged, not one blurred embedding of the\n# whole question.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The playbook being retrieved rather than prompted is a real decision: it is\nthe firm's rule for which clause wins, it differs by client and deal type,\nand baking it into the system prompt would apply one client's playbook to\nanother. So it is a row in the corpus, retrieved under the same client\nfilter as the clauses. Decomposition also makes each citation defensible:\nthe MSA clause and the SOW clause are retrieved separately, so the markup\ncan cite each by id.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "secretsmanager",
+            "operation": "GetSecretValue",
+            "body": {
+              "SecretString": "{\"host\": \"contract-db.cluster-abc.eu-central-1.rds.amazonaws.com\", \"username\": \"desk\", \"password\": \"redacted-in-lab\", \"dbname\": \"matters\"}"
+            }
+          },
+          {
+            "service": "rds",
+            "operation": "DescribeDBClusters",
+            "body": {
+              "DBClusters": [
+                {
+                  "DBClusterIdentifier": "contract-db",
+                  "Status": "available",
+                  "Engine": "aurora-postgresql",
+                  "EngineVersion": "16.4"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A customer-managed knowledge base over Aurora",
+      "decision": "Whether to rebuild the matter schema inside a managed index, or point a customer-managed knowledge base at the Aurora data you already filter with SQL.",
+      "why": "You want the convenience of a managed retrieval surface without giving up the SQL filters and the schema the firm trusts. A customer-managed knowledge base points at the existing Aurora store: you keep client, matter, and effective_date as the columns you filter on, and the managed layer handles the retrieval orchestration over them. The losing choice is a fully-managed index that re-chunks and re-stores the clauses in its own structure — now the matter schema exists twice, the filters are re-expressed in metadata you can get wrong, and the cross-client guarantee depends on the copy. Configuration: the lesson is customer-managed over the trusted store, not a rebuild.",
+      "snippets": [
+        {
+          "label": "A knowledge base configured to use the existing Aurora/pgvector store, not to build its own.",
+          "language": "typescript",
+          "source": "const kb = new CfnKnowledgeBase(this, 'ContractKB', {\n  name: 'contract-desk',\n  roleArn: kbRole.roleArn,\n  knowledgeBaseConfiguration: { type: 'VECTOR', vectorKnowledgeBaseConfiguration: { embeddingModelArn: titanEmbedArn } },\n  storageConfiguration: {\n    type: 'RDS',\n    rdsConfiguration: {\n      resourceArn: auroraClusterArn,\n      tableName: 'clause',\n      fieldMapping: { primaryKeyField: 'clause_id', vectorField: 'embedding', textField: 'text', metadataField: 'metadata' },\n    },\n  },\n});"
+        }
+      ],
+      "infrastructure": "// Customer-managed: the knowledge base points at the Aurora/pgvector store\n// the firm already runs, mapping to the clause table's own columns. The\n// SQL filters and the schema stay. A fully-managed index would re-chunk and\n// re-store the clauses, duplicating the matter schema and moving the\n// cross-client guarantee into metadata you can get wrong.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the customer-managed knowledge base from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: the KB uses the existing Aurora store and the clause table's\n// columns, so the SQL filters and schema you trust are not rebuilt.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The RDS storage configuration is the tell: the knowledge base is told which\ntable and which columns to use, rather than creating its own vector store.\nThis is the 'bring your own store' path from the managed-vs-self decision,\nchosen here because the store already holds the joins the product depends\non. The fieldMapping is where client and effective_date stay first-class\nrather than being flattened into an opaque metadata blob.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "type: 'RDS'",
+            "present": true,
+            "message": "The knowledge base uses the existing Aurora (RDS) store, not a new vector store it owns. The matter schema is not duplicated."
+          },
+          {
+            "pattern": "fieldMapping",
+            "present": true,
+            "message": "The field mapping ties the KB to the clause table's own columns, so client and effective_date stay first-class filters rather than opaque metadata."
+          },
+          {
+            "pattern": "resourceArn: auroraClusterArn",
+            "present": true,
+            "message": "The KB points at the Aurora cluster ARN the firm already runs — customer-managed, keeping the SQL and the schema you trust."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A confused-deputy condition on the KB role",
+      "decision": "What stops this knowledge base role from being handed to another account's knowledge base and used to read this firm's clauses.",
+      "why": "The knowledge base role can read the firm's clause table. Without a scope condition, that role's trust policy could be assumed on behalf of another account's knowledge base — the confused-deputy problem: your role, their caller, your data. The trust policy pins aws:SourceAccount and aws:SourceArn to this account and this knowledge base, so the role only acts for the deputy it was built for. Configuration: the lesson is the source conditions on the trust policy. The losing choice is a role that trusts the Bedrock service principal with no source scoping — technically functional, and exactly the hole a cross-account caller walks through to read clauses that are not theirs.",
+      "snippets": [
+        {
+          "label": "The trust policy scopes the service principal to this account and this knowledge base. Not a bare service-principal trust.",
+          "language": "typescript",
+          "source": "const kbRole = new Role(this, 'ContractKbRole', {\n  assumedBy: new ServicePrincipal('bedrock.amazonaws.com', {\n    conditions: {\n      StringEquals: { 'aws:SourceAccount': account },\n      ArnLike: { 'aws:SourceArn': knowledgeBaseArn },\n    },\n  }),\n});"
+        }
+      ],
+      "infrastructure": "// The KB role trusts the Bedrock service principal only when the call is\n// for this account (aws:SourceAccount) and this knowledge base\n// (aws:SourceArn). Without those conditions the role is a confused deputy:\n// another account's knowledge base could induce Bedrock to assume it and\n// read this firm's clauses. The source conditions close that.",
+      "workbench": {
+        "open": "policy.ts",
+        "files": [
+          {
+            "path": "policy.ts",
+            "body": "// Assemble the KB role's trust policy from the snippet on the left.\n// Configuration step: the sandbox has no principals, so there is nothing\n// to Run — the lesson is the trust policy's shape.\n//\n// The goal: the role acts only for this account and this knowledge base,\n// never for another account's deputy.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Confused deputy is the exact risk here: the deputy is the Bedrock service,\nwhich assumes your role to do retrieval. A bare ServicePrincipal trust lets\nany Bedrock knowledge base in any account be the thing that triggers the\nassume — so another firm's KB, mis-pointed at your cluster, reads your\nclauses. aws:SourceArn pins it to your knowledge base specifically;\naws:SourceAccount is the account-level backstop. This is a configuration\nstep by necessity: the sandbox never authorizes against IAM.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "aws:SourceArn",
+            "present": true,
+            "message": "The trust policy pins the source ARN to this knowledge base, so the role acts only for the deputy it was built for."
+          },
+          {
+            "pattern": "aws:SourceAccount",
+            "present": true,
+            "message": "The account-level condition is the backstop: the role is assumable on behalf of this account's Bedrock calls only."
+          },
+          {
+            "pattern": "ServicePrincipal('bedrock.amazonaws.com'",
+            "present": true,
+            "message": "The role trusts the Bedrock service principal — but scoped by the source conditions, so it is not a confused deputy a cross-account KB can drive."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Create fails once on role propagation",
+      "decision": "What to do when the knowledge base create fails immediately after the role is created, with an error that the role cannot be assumed.",
+      "why": "A freshly created IAM role is not instantly usable everywhere: IAM is eventually consistent, and a knowledge base create that runs milliseconds after the role is defined can fail because the role has not propagated to the service that assumes it. The error reads like a permissions problem, which sends people rebuilding the policy that is actually correct. The fix is to wait and retry the create — a short backoff, not a redesign. It is not a different store, not a broken trust policy, not a missing permission. This is a diagnosis step: the sandbox cannot reproduce IAM propagation timing, so the lesson is recognizing the symptom and the right response.",
+      "snippets": [
+        {
+          "label": "The symptom and the fix, as the thing to recognize. Propagation, not a policy bug.",
+          "language": "python",
+          "source": "# Symptom: CreateKnowledgeBase fails right after the role is created, with\n# 'the provided role cannot be assumed' or a validation error on the role.\n#\n# Cause: IAM is eventually consistent. The role is correct; it has not\n# propagated to the assuming service yet.\n#\n# Fix: retry the create with a short backoff. Do NOT rewrite the trust\n# policy (step above is correct) and do NOT switch stores.\nRETRY = {\"max_attempts\": 5, \"backoff_seconds\": [2, 4, 8, 16, 32]}"
+        }
+      ],
+      "infrastructure": "// Nothing to change. The create failing once after role creation is IAM\n// propagation, not a wrong policy. The correct response is a bounded retry\n// with backoff on the create. Rebuilding the trust policy or switching\n// stores 'fixes' a bug that was never there and leaves the real one — a\n// missing retry — in place.",
+      "workbench": {
+        "open": "diagnosis.md",
+        "files": [
+          {
+            "path": "diagnosis.md",
+            "body": "# CreateKnowledgeBase fails right after the role is created\n\nAssemble the symptom-and-fix from the snippet on the left. This is a\ndiagnosis step: IAM propagation timing cannot be reproduced in the sandbox,\nso the lesson is recognizing the symptom and choosing the retry over a\nredesign.\n\nThe seeded symptom: the trust policy is the correct one from the previous\nstep, and the create still fails on first attempt.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is the step that teaches patience as an engineering answer. The\ninstinct on an assume-role error is to touch the policy, and here the\npolicy is right — the previous step built it correctly. Eventual\nconsistency in IAM means 'correct' and 'usable everywhere' are a few\nseconds apart. A bounded retry with backoff is the fix; an unbounded retry\nis a different bug, and rewriting the correct policy is how you end up with\ntwo problems.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "IAM is eventually consistent",
+            "present": true,
+            "message": "The cause is IAM eventual consistency: the role is correct but has not propagated to the assuming service yet."
+          },
+          {
+            "pattern": "retry the create with a short backoff",
+            "present": true,
+            "message": "The fix is a bounded retry with backoff on the create — not a policy rewrite and not a different store."
+          },
+          {
+            "pattern": "Do NOT rewrite the trust",
+            "present": true,
+            "message": "The trust policy from the previous step is correct. Rewriting it fixes a bug that was never there and leaves the missing retry in place."
+          }
+        ]
+      }
+    }
+  ]
+}

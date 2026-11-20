@@ -1,0 +1,465 @@
+{
+  "schemaVersion": 1,
+  "id": "overnight-claims",
+  "name": "Overnight claims",
+  "summary": "Fifty thousand claim scans processed overnight into a queryable table, where one corrupt packet must not fail the other 49,999.",
+  "brief": {
+    "whoIsAsking": "An insurer dropping about 50,000 claim packets a night, each a scan whose useful part is a table — provider, line, amount — with analysts querying the extracted fields in the morning. Nobody is waiting on a token.",
+    "whatTheyNeedBack": "A finished table analysts can query with SQL in the morning, with any bad file set aside rather than allowed to sink the batch.",
+    "systemsAlreadyRunning": "A nightly drop of scanned claim packets. Analysts already know SQL and query the output. This is a batch job, not a chat endpoint.",
+    "breaksWhen": "One corrupt packet fails the night. Analysts arrive to nothing, and the backlog doubles before the next window opens.",
+    "doneMeans": "The night finishes with a table analysts can query, the bad file is in a dead-letter queue with a reason, and the cost note shows the batch beating the provisioned estimate."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "drop", "label": "Nightly scan drop (S3)", "icon": "s3", "flowsTo": ["queue"] },
+          { "id": "queue", "label": "SQS + DLQ", "group": "acct", "flowsTo": ["prep"] },
+          { "id": "prep", "label": "SageMaker Processing", "group": "acct", "flowsTo": ["textract", "batch"] },
+          { "id": "textract", "label": "Textract", "group": "acct" },
+          { "id": "batch", "label": "Bedrock batch inference", "icon": "bedrock", "group": "acct", "flowsTo": ["out"] },
+          { "id": "out", "label": "Output tables (S3)", "icon": "s3", "group": "acct", "flowsTo": ["glue"] },
+          { "id": "glue", "label": "Glue DQ + catalog", "group": "acct", "flowsTo": ["athena"] },
+          { "id": "athena", "label": "Athena", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Batch inference, not a chat turn",
+      "decision": "Whether 50,000 nightly documents go through synchronous chat calls, provisioned throughput, or batch inference.",
+      "why": "The work is a pile of documents with nobody waiting on a token. A synchronous chat call per document is the wrong shape — it is built for a caller watching a reply, and 50,000 of them serially is slow and rate-limited. Provisioned throughput buys dedicated capacity for a job that runs once a night and then goes quiet, paying for idle hours. Batch inference is exactly this shape: submit a large job of records, AWS runs it against spare capacity at a lower price, and results land in S3 when done. This is runnable: submitting the batch job returns a job arn and an InProgress status. The losing choice is synchronous chat or provisioned throughput for an offline pile of work.",
+      "snippets": [
+        {
+          "label": "The Bedrock client, submitting a batch inference job over the night's records in S3.",
+          "language": "python",
+          "source": "import boto3\n\nbedrock = boto3.client(\"bedrock\", region_name=\"eu-central-1\")\n\nINPUT = \"s3://claims-nightly/2026-11-02/input.jsonl\"\nOUTPUT = \"s3://claims-nightly/2026-11-02/output/\""
+        },
+        {
+          "label": "Submit the batch job. No caller waits; results land in S3 when the job finishes.",
+          "language": "python",
+          "source": "job = bedrock.create_model_invocation_job(\n    jobName=\"claims-2026-11-02\",\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    roleArn=batchRoleArn,\n    inputDataConfig={\"s3InputDataConfig\": {\"s3Uri\": INPUT}},\n    outputDataConfig={\"s3OutputDataConfig\": {\"s3Uri\": OUTPUT}},\n)\nprint(job[\"jobArn\"])"
+        },
+        {
+          "label": "From the terminal, check the job's status — get-model-invocation-job shows InProgress or Completed without waiting on a token.",
+          "language": "shell",
+          "source": "aws bedrock get-model-invocation-job --job-identifier claims-2026-11-02"
+        }
+      ],
+      "infrastructure": "// Batch inference fits a pile of documents with no caller waiting: submit the night's records, AWS runs them against spare capacity at a lower price, results land in S3. A synchronous chat call per document is built for a watching caller; provisioned throughput pays for idle capacity on a once-a-night job. Neither fits offline bulk work.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the batch job submission from the snippets on the left, then\n# Run. The intercept returns a job arn and an InProgress status.\n#\n# The goal: the night's work is a batch job, not 50,000 synchronous chat\n# calls and not a provisioned-throughput reservation.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Three ways to run inference, one fit. Synchronous (Converse/InvokeModel):\na caller is waiting. Provisioned throughput: steady high-volume load that\njustifies a capacity commitment. Batch (CreateModelInvocationJob): a pile\nof records, no one waiting, price-sensitive. The night job is squarely\nbatch, and the cost step at the end exists to stop someone 'fixing' a slow\nnight by buying throughput the workload does not need.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock",
+            "operation": "CreateModelInvocationJob",
+            "body": {
+              "jobArn": "arn:aws:bedrock:eu-central-1:111122223333:model-invocation-job/claims-2026-11-02"
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "GetModelInvocationJob",
+            "body": {
+              "jobName": "claims-2026-11-02",
+              "status": "InProgress",
+              "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Textract parses before the model sees the page",
+      "decision": "Whether the model reads the raw scan, or Textract extracts the table first and the model receives structured fields.",
+      "why": "A claim packet's useful part is a table, and the model is not a form reader. Handed a blurry scan, a language model will confabulate a plausible table — numbers that look like amounts but were never on the page. Textract with table extraction reads the scan's structure first: it returns the provider, line, and amount as located cells, and the model receives those fields rather than pixels. Parsing before the model is the same discipline as the policy assistant's advanced parsing, here because the input is an image. This is runnable: Textract analysis returns the extracted table blocks. The losing choice is feeding the scan straight to the model and trusting a number it read off a smudge.",
+      "snippets": [
+        {
+          "label": "Textract analyzes the scan for tables before the model sees anything. Located cells, not pixels.",
+          "language": "python",
+          "source": "import boto3\n\ntextract = boto3.client(\"textract\", region_name=\"eu-central-1\")\n\nout = textract.analyze_document(\n    Document={\"S3Object\": {\"Bucket\": \"claims-nightly\", \"Name\": \"packet-0001.png\"}},\n    FeatureTypes=[\"TABLES\"],\n)\nblocks = [b for b in out[\"Blocks\"] if b[\"BlockType\"] == \"CELL\"]\nprint(len(blocks), \"table cells\")"
+        },
+        {
+          "label": "From the terminal, confirm Textract is reachable in the Region before the batch depends on it — a quick list of nothing still proves the client.",
+          "language": "shell",
+          "source": "aws textract list-adapters"
+        }
+      ],
+      "infrastructure": "// Textract extracts the table before the model sees the page: it returns provider, line, and amount as located cells. The model receives structured fields, not a scan. Hand a blurry image to a language model and it invents a plausible table — numbers that were never on the page. Parsing before the model is the form-reader's job, not the model's.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the Textract call from the snippets on the left, then Run. The\n# intercept returns extracted table cells.\n#\n# The goal: the table is extracted by Textract before the model sees it, so\n# the model reads fields, not a blurry scan it would confabulate from.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'The model is not the form reader' is the whole lesson. Textract is the\npurpose-built OCR-and-table extractor; the model's job is reasoning over\nclean fields, not pixel-reading a scan. This mirrors the policy assistant's\nadvanced-parsing step — parse structure before the model — with the input\nbeing an image instead of a PDF. A confabulated amount on an insurance\nclaim is worse than a wrong answer: it is a fabricated financial figure.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "textract",
+            "operation": "AnalyzeDocument",
+            "body": {
+              "Blocks": [
+                { "BlockType": "CELL", "Text": "Provider A", "RowIndex": 1, "ColumnIndex": 1 },
+                { "BlockType": "CELL", "Text": "118.00", "RowIndex": 1, "ColumnIndex": 3 }
+              ]
+            }
+          },
+          {
+            "service": "textract",
+            "operation": "ListAdapters",
+            "body": {
+              "Adapters": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "SQS with a concurrency cap and a DLQ",
+      "decision": "How the night's work is paced, and where a poison file goes so it does not retry forever.",
+      "why": "Fifty thousand packets need a pace: an SQS queue feeds the processors, a concurrency cap keeps the batch from overwhelming Textract and the downstream rate limits, and a dead-letter queue catches a packet that fails repeatedly. A poison file — a corrupt scan that errors every time — must leave the main queue after a few tries and land in the DLQ with the night continuing, not retry endlessly and stall the pipeline. Configuration: the lesson is the queue, the cap, and the DLQ together. The losing choice is an uncapped fan-out with no DLQ, where a poison message either retries forever or takes the batch down with it.",
+      "snippets": [
+        {
+          "label": "An SQS queue with a redrive policy to a DLQ, and a concurrency cap on the consumer.",
+          "language": "typescript",
+          "source": "const dlq = new Queue(this, 'ClaimsDLQ');\nconst work = new Queue(this, 'ClaimsWork', {\n  deadLetterQueue: { queue: dlq, maxReceiveCount: 3 },\n});\nprocessor.addEventSource(new SqsEventSource(work, { maxConcurrency: 50 }));"
+        }
+      ],
+      "infrastructure": "// SQS paces the night: the work queue feeds processors, maxConcurrency caps the fan-out so Textract and downstream limits are not overwhelmed, and a redrive policy sends a packet that fails maxReceiveCount times to the DLQ. A poison file leaves the main queue and the night continues; an uncapped queue with no DLQ retries it forever or takes the batch down.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the queue, cap, and DLQ from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the night is paced by SQS with a concurrency cap, and a poison\n// file lands in the DLQ rather than retrying forever.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The DLQ is the structural half of the Breaks when: 'one corrupt packet must\nnot fail the other 49,999.' maxReceiveCount is how many tries before a\nmessage is poison; after that it goes to the DLQ with the night unaffected.\nThe concurrency cap is the pacing half — an uncapped Lambda fan-out over\n50,000 messages would hit Textract and Bedrock rate limits and turn the\nnight into a throttle storm.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "deadLetterQueue",
+            "present": true,
+            "message": "A dead-letter queue catches a packet that fails repeatedly, so a poison file leaves the main queue instead of retrying forever."
+          },
+          {
+            "pattern": "maxReceiveCount: 3",
+            "present": true,
+            "message": "After a few tries a message is treated as poison and sent to the DLQ — the night continues without it."
+          },
+          {
+            "pattern": "maxConcurrency",
+            "present": true,
+            "message": "A concurrency cap paces the fan-out so the batch does not overwhelm Textract and downstream rate limits."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "SageMaker Processing for the heavy prep",
+      "decision": "Whether 50,000 scans are unpacked and prepared in Lambda, or in a SageMaker Processing job.",
+      "why": "Unpacking and preparing 50,000 scans — decompressing, normalizing, batching for Textract and the model — is a heavy, long-running batch job. Lambda is the wrong place: the 15-minute limit, the memory ceiling, and the per-invocation model make it a poor fit for a job that churns through tens of thousands of large files. SageMaker Processing is built for exactly this: a containerized batch job with the compute and runtime a bulk prep needs, spun up for the night and torn down after. Configuration: the lesson is Processing for heavy batch prep. The losing choice is forcing the prep into Lambda, which means fighting timeouts and fanning out complexity to work around a limit that Processing does not have.",
+      "snippets": [
+        {
+          "label": "A SageMaker Processing job for the heavy prep. The compute and runtime a 50,000-file batch needs.",
+          "language": "typescript",
+          "source": "const prep = new CfnProcessingJob(this, 'ClaimsPrep', {\n  processingResources: { clusterConfig: { instanceCount: 4, instanceType: 'ml.m5.2xlarge', volumeSizeInGb: 200 } },\n  appSpecification: { imageUri: prepImageUri },\n  roleArn: processingRoleArn,\n});"
+        }
+      ],
+      "infrastructure": "// SageMaker Processing runs the heavy prep: decompress, normalize, and batch 50,000 scans in a containerized job with the compute and runtime it needs, spun up for the night and gone after. Lambda's 15-minute limit and memory ceiling make it the wrong place to unpack tens of thousands of large files — you would fight timeouts to work around a limit Processing does not have.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Processing job from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the heavy 50,000-scan prep runs on SageMaker Processing, not\n// forced into Lambda against its timeout and memory limits.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The Lambda-vs-Processing decision is the batch analogue of the desk\nrouter's Lambda-vs-ECS one: shape and lifecycle, not importance. A short\nper-file transform can be Lambda; unpacking 50,000 scans in one run is a\nheavy batch job, which is SageMaker Processing's purpose. The tell for\n'wrong tool' is a design full of Step Functions Map states fanning out\nLambdas to dodge the 15-minute limit — that complexity is the limit\nleaking into the architecture.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnProcessingJob",
+            "present": true,
+            "message": "A SageMaker Processing job runs the heavy prep — the compute and runtime a 50,000-file batch needs."
+          },
+          {
+            "pattern": "instanceCount: 4",
+            "present": true,
+            "message": "A sized cluster handles the bulk prep in one run, rather than fanning out Lambdas to dodge a timeout."
+          },
+          {
+            "pattern": "new Function(",
+            "present": false,
+            "message": "The prep is not a Lambda. The 15-minute limit and memory ceiling make Lambda the wrong place to unpack tens of thousands of scans."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Glue Data Quality, then a catalog",
+      "decision": "Whether the extracted tables are trusted as-is, or checked by Glue Data Quality and cataloged before analysts query them.",
+      "why": "A row with no amount, a provider field that is empty, a line that did not parse — those are normal in a 50,000-scan night, and they must not become a morning surprise when an analyst sums a column and the total is wrong. Glue Data Quality runs rules over the output tables (amount is non-null, line is numeric) and flags or quarantines the rows that fail, then a Glue catalog makes the clean tables queryable. The quality gate is before the analyst, not after. Configuration: the lesson is Data Quality plus the catalog. The losing choice is cataloging the raw output untested, which pushes every parse failure onto the analyst as a silent data error.",
+      "snippets": [
+        {
+          "label": "Glue Data Quality rules over the output, then a catalog table. Bad rows are caught before the morning query.",
+          "language": "typescript",
+          "source": "const dq = new CfnDataQualityRuleset(this, 'ClaimsDQ', {\n  ruleset: 'Rules = [ ColumnValues \"amount\" > 0, IsComplete \"provider\", ColumnDataType \"line\" = \"INTEGER\" ]',\n  targetTable: { tableName: 'claims_extracted', databaseName: 'claims' },\n});"
+        }
+      ],
+      "infrastructure": "// Glue Data Quality runs rules over the extracted tables — amount present and positive, provider complete, line numeric — and flags the rows that fail before analysts query. Then a Glue catalog makes the clean tables queryable. Cataloging raw untested output pushes every parse failure onto the analyst as a silent wrong total.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Data Quality ruleset from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: Glue DQ checks the extracted rows before they are cataloged,\n// so a row with no amount is caught, not summed into a wrong total.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Data Quality is the gate between extraction and the analyst. The rules are\nthe assumptions the morning SQL will make — amount is a positive number,\nprovider is filled, line is an integer — asserted on the data before the\nanalyst trusts it. Without it, a parse failure (Textract missed a cell, the\nmodel returned null) becomes a silent null in a SUM, and the morning total\nis quietly wrong with no error anywhere.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnDataQualityRuleset",
+            "present": true,
+            "message": "Glue Data Quality rules run over the output tables before analysts query, catching bad rows at the gate."
+          },
+          {
+            "pattern": "IsComplete \"provider\"",
+            "present": true,
+            "message": "A completeness rule catches an empty provider field, so a parse miss does not become a silent null in the morning query."
+          },
+          {
+            "pattern": "ColumnValues \"amount\" > 0",
+            "present": true,
+            "message": "An amount rule asserts the assumption the morning SUM will make, so a zero or missing amount is flagged rather than summed."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Athena for the morning query",
+      "decision": "Whether analysts query the finished table with SQL via Athena, or a chatbot is put in front of it.",
+      "why": "The analysts already know SQL, and the morning question is a query over a finished table: sum amounts by provider, find lines over a threshold, join to the policy table. Athena runs SQL directly over the cataloged output in S3, which is exactly what they want. Putting a chatbot in front of a finished table adds a model call, a natural-language-to-SQL translation that can be wrong, and a layer between the analyst and the data they can already query precisely. This is runnable: an Athena query over the extracted table returns rows. The losing choice is a conversational layer the analysts did not ask for, over data that is already SQL-shaped.",
+      "snippets": [
+        {
+          "label": "The Athena client, running SQL over the cataloged claims table.",
+          "language": "python",
+          "source": "import boto3\n\nathena = boto3.client(\"athena\", region_name=\"eu-central-1\")\n\nSQL = \"SELECT provider, SUM(amount) FROM claims.claims_extracted GROUP BY provider\""
+        },
+        {
+          "label": "Start the query over the finished table. SQL the analysts already know, no model in the path.",
+          "language": "python",
+          "source": "out = athena.start_query_execution(\n    QueryString=SQL,\n    QueryExecutionContext={\"Database\": \"claims\"},\n    ResultConfiguration={\"OutputLocation\": \"s3://claims-nightly/athena-results/\"},\n)\nprint(out[\"QueryExecutionId\"])"
+        },
+        {
+          "label": "From the terminal, confirm the database and table exist before querying — list the tables Athena will read.",
+          "language": "shell",
+          "source": "aws athena list-table-metadata --catalog-name AwsDataCatalog --database-name claims"
+        }
+      ],
+      "infrastructure": "// Athena runs SQL directly over the cataloged output in S3 — sum by provider, filter lines, join to policy. The analysts already know SQL, so a chatbot in front of the table adds a model call, a text-to-SQL translation that can be wrong, and a layer between them and data they can query precisely. No model in the morning path.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the Athena query from the snippets on the left, then Run. The\n# intercept returns a query execution id.\n#\n# The goal: analysts query the finished table with the SQL they already\n# know, with no model call in the morning path.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'They do not need a chatbot in front of a finished table' is the restraint\nlesson, like the desk router's no-reflection-agent step. The output of the\nnight is structured, cataloged data; SQL is the precise, auditable way to\nquery it, and Athena runs SQL over S3 with no servers. A natural-language\nlayer would trade precision for convenience the analysts did not ask for,\nand introduce a text-to-SQL model that can silently mistranslate a query.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "athena",
+            "operation": "StartQueryExecution",
+            "body": {
+              "QueryExecutionId": "q-claims-7781"
+            }
+          },
+          {
+            "service": "athena",
+            "operation": "ListTableMetadata",
+            "body": {
+              "TableMetadataList": [
+                { "Name": "claims_extracted", "TableType": "EXTERNAL_TABLE" }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "EMR only if the job outgrows Glue",
+      "decision": "Whether to reach for EMR because the data is large, or stay on Glue until the job genuinely outgrows it.",
+      "why": "EMR is the heavyweight: a managed Hadoop/Spark cluster for jobs that genuinely need that scale and control. 'The data is big' is not the trigger — Glue is serverless Spark and handles very large jobs without a cluster to run. EMR earns its place when the job needs a Spark version Glue does not offer, custom cluster tuning, long-running sessions, or a mix of frameworks Glue cannot express. For nightly claim extraction, Glue fits, so EMR would be operating a cluster for no benefit. Configuration: the lesson is EMR as the exception, not the default. The losing choice is standing up EMR because the row count is large, paying cluster ops for work Glue does serverless.",
+      "snippets": [
+        {
+          "label": "The decision recorded: Glue fits the night job, so EMR is not used. EMR is for when Glue genuinely runs out.",
+          "language": "typescript",
+          "source": "const processing = {\n  engine: 'GLUE', // serverless Spark; fits this job\n  // EMR only when: a Spark version Glue lacks, custom cluster tuning, or\n  // a framework mix Glue cannot express. 'Big data' alone is not it.\n};"
+        }
+      ],
+      "infrastructure": "// Glue is serverless Spark and handles very large jobs with no cluster to operate, so it fits the nightly extraction. EMR is the exception — reached for when the job needs a Spark version Glue lacks, custom tuning, or a framework mix Glue cannot express. Standing up EMR because the row count is large is cluster ops for work Glue does serverless.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the engine decision from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: record that Glue fits the night job, so EMR is not stood up\n// just because the data is large.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'Big data means EMR' is the reflex this step corrects. Glue runs Spark\nserverless and scales to very large jobs; the question is not size but\nwhether you need something Glue withholds — a specific Spark/Hadoop\nversion, deep cluster tuning, or frameworks like Flink or Presto run\nyourself. Absent those, EMR is a cluster you operate for no gain. This\nmirrors the managed-vs-self-run store decision from the policy assistant.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "engine: 'GLUE'",
+            "present": true,
+            "message": "Glue (serverless Spark) is the engine; it fits the nightly job with no cluster to operate."
+          },
+          {
+            "pattern": "'Big data' alone is not it",
+            "present": true,
+            "message": "Size alone does not justify EMR. The trigger is a capability Glue lacks, not the row count."
+          },
+          {
+            "pattern": "CfnCluster",
+            "present": false,
+            "message": "No EMR cluster is stood up. For work Glue does serverless, EMR is cluster ops for no benefit."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Partial failure, so the night continues",
+      "decision": "Whether one failing document fails the whole job, or drops out while the other 49,999 finish.",
+      "why": "This is the Breaks when, made into a setting. The default for many batch and Map constructs is fail-fast: one error aborts the job. For this night that is the outage — one corrupt packet and analysts arrive to nothing. The fix is an explicit tolerated-failure threshold: a Distributed Map (or the batch job's error handling) that lets a bounded fraction of documents fail into the DLQ while the rest complete. The night finishes with 49,999 rows and one file set aside with a reason. Configuration: the lesson is the tolerated-failure setting. The losing choice is the default fail-fast, where the first poison packet ends the night for everyone.",
+      "snippets": [
+        {
+          "label": "A Distributed Map with a tolerated-failure percentage, so a few bad documents do not fail the night.",
+          "language": "typescript",
+          "source": "const processAll = new DistributedMap(this, 'ProcessClaims', {\n  toleratedFailurePercentage: 2, // a few poison files drop out; the night finishes\n  itemReader: new S3JsonItemReader({ bucket: claimsBucket, key: 'manifest.json' }),\n});"
+        }
+      ],
+      "infrastructure": "// A Distributed Map with toleratedFailurePercentage lets a bounded fraction of documents fail into the DLQ while the rest complete. The default is fail-fast — one error aborts the job — which for this night is the outage. Partial failure is the setting that makes 'one corrupt packet must not fail the other 49,999' true.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Distributed Map with tolerated failure from the snippet on\n// the left. Configuration step: nothing to Run.\n//\n// The goal: a bounded fraction of documents may fail without failing the\n// night, so one corrupt packet does not stop the other 49,999.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "toleratedFailurePercentage is the Breaks when expressed as a number. The\ndefault fail-fast behavior is correct for a workflow where any failure is a\nreal stop; it is exactly wrong for a bulk job where individual failures are\nnormal and expected. Set the threshold deliberately — 2% here — so a\nrash of failures still stops the night (something is broadly wrong) but a\nhandful of corrupt scans do not. The failed items go to the DLQ with a\nreason, satisfying Done means.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "toleratedFailurePercentage",
+            "present": true,
+            "message": "A tolerated-failure threshold lets a bounded fraction of documents fail while the night finishes — one corrupt packet does not fail the batch."
+          },
+          {
+            "pattern": "DistributedMap",
+            "present": true,
+            "message": "A Distributed Map processes the night's items with per-item failure handling, not an all-or-nothing job."
+          },
+          {
+            "pattern": "toleratedFailurePercentage: 0",
+            "present": false,
+            "message": "The threshold is not zero (fail-fast). Zero tolerance means the first poison packet ends the night for everyone — the outage this scenario is built against."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The cost note beats a provisioned estimate",
+      "decision": "Whether the batch's cost is recorded next to the provisioned-throughput estimate it beats, so the next person does not 'fix' the night by buying throughput.",
+      "why": "The whole architecture rests on batch being the right shape, and the evidence is the cost: the batch job's actual spend, written down next to what provisioned throughput would have cost for the same work. Provisioned throughput loses here because the job runs once a night and goes quiet — you would pay for 24 hours of dedicated capacity to use a few of them. Recording the comparison is not bookkeeping; it is a guardrail against a future engineer 'fixing' a slow night by buying throughput, reintroducing the cost the batch design avoided. This is a diagnosis/record step: the lesson is the written comparison. The losing move is leaving the cost rationale undocumented, so the batch decision looks arbitrary and gets reversed.",
+      "snippets": [
+        {
+          "label": "The cost comparison, recorded: the batch's actual spend against the provisioned estimate it beats.",
+          "language": "python",
+          "source": "# Night cost, written next to the alternative so the decision is auditable:\nBATCH_COST_PER_NIGHT = 42.00       # actual: batch inference, spot-priced\nPROVISIONED_PER_NIGHT = 960.00     # estimate: 1 model unit, 24h, mostly idle\n# Provisioned loses because the job runs once a night and goes quiet.\n# This note exists so nobody 'fixes' a slow night by buying throughput.\nprint(PROVISIONED_PER_NIGHT / BATCH_COST_PER_NIGHT, \"x cheaper\")"
+        }
+      ],
+      "infrastructure": "// The batch cost is recorded next to the provisioned-throughput estimate it beats: a once-a-night job does not justify 24 hours of dedicated capacity. The comparison is a guardrail, not bookkeeping — it stops a future engineer 'fixing' a slow night by buying throughput and reintroducing the cost the batch design avoided.",
+      "workbench": {
+        "open": "diagnosis.py",
+        "files": [
+          {
+            "path": "diagnosis.py",
+            "body": "# Assemble the cost comparison from the snippet on the left. Configuration\n# step: nothing to Run.\n#\n# The goal: the batch cost is written next to the provisioned estimate it\n# beats, so the batch decision is auditable and not reversed by habit.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is the Done means's 'cost note shows the batch beating the provisioned\nestimate.' The number matters less than the habit: a design decision that\nsaves money should carry the comparison that justified it, or the next\nperson re-opens the question and often answers it wrong (buying throughput\nfor a bursty, idle-most-of-the-day job). Document the loser, not just the\nwinner, so the reasoning survives.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "BATCH_COST_PER_NIGHT",
+            "present": true,
+            "message": "The batch's actual per-night cost is recorded, the evidence that batch is the right shape."
+          },
+          {
+            "pattern": "PROVISIONED_PER_NIGHT",
+            "present": true,
+            "message": "The provisioned estimate is written alongside, so the comparison is explicit and the batch decision is auditable."
+          },
+          {
+            "pattern": "fixes' a slow night by buying throughput",
+            "present": true,
+            "message": "The note exists as a guardrail against reversing the batch decision — nobody should 'fix' a slow night by buying throughput the workload does not need."
+          }
+        ]
+      }
+    }
+  ]
+}

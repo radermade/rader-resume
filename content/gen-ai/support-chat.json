@@ -1,0 +1,639 @@
+{
+  "schemaVersion": 1,
+  "id": "support-chat",
+  "name": "Support chat",
+  "summary": "A streamed support assistant where a cached answer carrying another caller's balance is the one failure no latency win justifies.",
+  "brief": {
+    "whoIsAsking": "A consumer support caller watching the reply stream in. A blank page for four seconds is the bug they file, even when the final answer is right.",
+    "whatTheyNeedBack": "Tokens quickly, a correct answer, and never another caller's account data — a cached FAQ must never contain someone's balance.",
+    "systemsAlreadyRunning": "A support product with lunchtime spikes and quiet nights. The system prompt and tool schemas change rarely; the caller's account changes every turn. Some questions are the public FAQ; some are account-specific.",
+    "breaksWhen": "A cached answer carries someone else's balance. That is a disclosure incident, and it is the one failure no latency win justifies.",
+    "doneMeans": "The caller sees tokens quickly, a cached FAQ never contains someone's balance, a spike degrades instead of retrying itself into a throttle, and a context overflow cuts tool output before it cuts the question."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "caller", "label": "Caller (watching stream)", "flowsTo": ["gateway"] },
+          { "id": "gateway", "label": "API Gateway (streaming)", "icon": "api-gateway", "group": "acct", "flowsTo": ["lambda"] },
+          { "id": "lambda", "label": "AWS Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["bedrock", "cache", "session"] },
+          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" },
+          { "id": "cache", "label": "ElastiCache / semantic cache", "group": "acct" },
+          { "id": "session", "label": "DynamoDB session", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Stream through API Gateway",
+      "decision": "Whether the answer is buffered in the Lambda and returned whole, or streamed token-by-token to the caller.",
+      "why": "The caller is watching the reply appear. A buffered Lambda holds the entire answer until it is complete and then returns it, so the page stays blank for the whole generation — four seconds of nothing, the bug they file even when the answer is right. Streaming sends tokens as the model produces them, through a streaming-capable path, so the first token reaches the caller almost immediately. This is runnable: ConverseStream returns an event stream the handler forwards. The losing choice is the buffered invoke that waits for the full completion before the caller sees anything.",
+      "snippets": [
+        {
+          "label": "ConverseStream, so tokens are forwarded as they are produced instead of buffered whole.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nresp = runtime.converse_stream(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"what are your hours\"}]}],\n)"
+        },
+        {
+          "label": "Forward each chunk as it arrives. The caller sees the first token right away, not after the whole answer.",
+          "language": "python",
+          "source": "for event in resp[\"stream\"]:\n    if \"contentBlockDelta\" in event:\n        print(event[\"contentBlockDelta\"][\"delta\"][\"text\"], end=\"\")"
+        },
+        {
+          "label": "From the terminal, confirm the streaming model is available before wiring the stream — list the text models in the Region.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+        }
+      ],
+      "infrastructure": "// ConverseStream yields tokens as the model produces them; the handler forwards each chunk over a streaming response. A buffered Lambda holds the whole answer and returns it at the end, so the page is blank for the full generation — the four-second blank the caller files as a bug. Streaming is the fix for perceived latency.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the streaming call from the snippets on the left, then Run. The\n# intercept returns a stream of content deltas.\n#\n# The goal: tokens are forwarded as produced, so the caller sees the reply\n# begin immediately instead of a blank page.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "converse_stream is the streaming sibling of converse: same inputs, but the\nresponse is an event stream of contentBlockDelta events. The handler\nforwards them over a streaming response. The lesson is perceived latency:\nthe final answer may be identical, but a buffered response feels broken\nbecause the caller stares at nothing while it generates.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "ConverseStream",
+            "body": { "stream": "deltas:what-are-your-hours" }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Prompt cache, stable prefix first",
+      "decision": "What goes before the cache point and what goes after, so the cacheable prefix never contains account data.",
+      "why": "Prompt caching reuses the model's work on a stable prefix across requests. The system prompt and tool schemas change rarely, so they go first, before the cache point. The caller's account data and the retrieved chunks change every turn, so they go after. Put the cache point before the user text and the chunks: the account number is never in the cached prefix. Order it wrong and you are either caching per-caller (no reuse) or risking one caller's data in another's cached prefix. This is runnable: Converse with a cachePoint returns cache-write then cache-read metrics. The losing choice is a cache point after the variable content, which caches nothing reusable.",
+      "snippets": [
+        {
+          "label": "The stable prefix (system + tools) before the cache point; the account data and chunks after it.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nsystem = [\n    {\"text\": STABLE_SYSTEM_PROMPT},\n    {\"cachePoint\": {\"type\": \"default\"}},  # everything before this is cached\n]"
+        },
+        {
+          "label": "The per-turn account data and chunks go in the messages, after the cache point. The account number is not in the prefix.",
+          "language": "python",
+          "source": "out = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    system=system,\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": f\"{account_context}\\n{question}\"}]}],\n)\nprint(out[\"usage\"][\"cacheReadInputTokens\"])"
+        },
+        {
+          "label": "From the terminal, list the models to confirm the one you cache against supports prompt caching in the Region.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-provider anthropic"
+        }
+      ],
+      "infrastructure": "// The cache point sits after the stable system prompt and tool schemas and before the caller's account data and retrieved chunks. The prefix never contains an account number. Order it wrong and you cache per-caller (no reuse) or risk one caller's data in a prefix reused for another — the disclosure this scenario is built against.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the cached-prefix Converse call from the snippets on the left,\n# then Run. The intercept returns usage with cache metrics.\n#\n# The goal: the cache point is before the account data, so the cached\n# prefix is the stable system prompt only — never a balance.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Prompt caching reuses the model's processing of a prefix. The rule is\norder by volatility: stable content (system prompt, tool schemas) first and\ncached; volatile content (account data, chunks, user text) after the cache\npoint. The safety reason outranks the cost reason — the cached prefix is\nshared machinery, so an account number in it is a number that could surface\nfor a different caller.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": { "message": { "role": "assistant", "content": [ { "text": "We are open 9 to 5, Monday to Friday." } ] } },
+              "stopReason": "end_turn",
+              "usage": { "inputTokens": 820, "outputTokens": 14, "cacheWriteInputTokens": 800, "cacheReadInputTokens": 0 }
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A timestamp broke the prefix",
+      "decision": "What to do when both cache metrics read zero because a timestamp was added to the prefix.",
+      "why": "Someone added the current time to the system prompt and now cacheWriteInputTokens and cacheReadInputTokens are both a legitimate zero on every call. The prefix changes every second, so nothing is ever a cache hit, and there is nothing to read. The instinct is to suspect the cache is misconfigured and force a hit; the real fix is to take the timestamp out of the prefix. A cache only works on bytes that repeat. This is a diagnosis step: the sandbox cannot reproduce the timing, so the lesson is reading the zero metrics correctly — the prefix is no longer stable. The losing move is fighting the cache config instead of removing the thing that varies.",
+      "snippets": [
+        {
+          "label": "The diagnosis: zero on both cache metrics means the prefix is not stable. Find what varies.",
+          "language": "python",
+          "source": "# Symptom: cacheWriteInputTokens AND cacheReadInputTokens are both 0 on\n# every call. Not an error — a legitimate zero.\n#\n# Cause: the prefix changes every request. A timestamp in the system prompt\n# ('The time is 14:03:22') makes every prefix unique, so nothing repeats.\n#\n# Fix: remove the varying value from the cached prefix. Do NOT try to force\n# a hit; a cache works only on bytes that repeat.\nPREFIX_MUST_BE = \"byte-identical across requests\""
+        }
+      ],
+      "infrastructure": "// Both cache metrics reading zero is the tell: the prefix is not byte-stable. A timestamp (or a request id, or anything per-request) in the system prompt makes every prefix unique, so there is never a hit to read or a reuse to write. The fix is removing the varying value, not reconfiguring the cache.",
+      "workbench": {
+        "open": "diagnosis.md",
+        "files": [
+          {
+            "path": "diagnosis.md",
+            "body": "# Both cache metrics are zero\n\nAssemble the diagnosis from the snippet on the left. This is a diagnosis\nstep: the cache timing cannot be reproduced in the sandbox, so the lesson\nis reading the two zero metrics correctly.\n\nThe seeded symptom: cacheWrite and cacheRead are both zero on every call,\nwith no error. The prefix has a timestamp in it.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The dangerous version is the opposite reading: assuming the zero means the\ncache is broken and 'fixing' it by raising TTLs or changing the cache\npoint, none of which touch the cause. Both metrics zero, no error, is the\nsignature of a prefix that varies per request. The audit question is always\n'is the cached prefix byte-identical across requests.'\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "both 0 on",
+            "present": true,
+            "message": "Both cache metrics reading a legitimate zero is the signature of a prefix that is not byte-stable across requests."
+          },
+          {
+            "pattern": "remove the varying value",
+            "present": true,
+            "message": "The fix is to remove the per-request value from the prefix, not to reconfigure the cache. A cache works only on bytes that repeat."
+          },
+          {
+            "pattern": "Do NOT try to force",
+            "present": true,
+            "message": "Forcing a hit is the wrong move. The prefix varies every request; the cause is the varying content, not the cache config."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Model choice lives in AppConfig",
+      "decision": "Whether the small-model/large-model choice is hardcoded in the service, or read from AppConfig so it changes without a deploy.",
+      "why": "Easy turns can use a small, cheap, fast model; a dispute needs a larger one. Which model a turn uses is a choice you will tune repeatedly as you learn the traffic — and tuning it must not require a code deploy of the service. AppConfig holds the model id and the routing rule, the handler reads it at runtime, and changing the model is a config change with its own rollout and rollback. Configuration: the lesson is the model id in AppConfig, not a constant in the handler. The losing choice is a hardcoded model id, which turns every routing tweak into a deploy and couples a config decision to a code release.",
+      "snippets": [
+        {
+          "label": "The model id and routing rule read from AppConfig at runtime, not compiled into the handler.",
+          "language": "typescript",
+          "source": "const modelRouting = new CfnConfigurationProfile(this, 'ModelRouting', {\n  applicationId: appConfigAppId,\n  name: 'model-routing',\n  locationUri: 'hosted',\n});\n// { easy: 'claude-haiku', hard: 'claude-sonnet' } — changed without a deploy"
+        }
+      ],
+      "infrastructure": "// The small-vs-large model choice and its routing rule live in AppConfig; the handler reads them at runtime. Tuning which turn gets which model is a config change with its own rollout and rollback, not a code deploy. A hardcoded model id couples a routing decision you will tune often to a release of the service.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the AppConfig model-routing profile from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: the model id lives in AppConfig, so changing which turn uses\n// which model is a config change, not a deploy.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The same 'prompt and model are configuration' principle as the policy\nassistant's Prompt Management step, applied to model selection. AppConfig\nis the lighter-weight home for a value you flip often — a model id, a\nrouting threshold — with staged rollout and automatic rollback on a\nCloudWatch alarm. The test: if changing which model answers a question\nrequires a service deploy, the decision is in the wrong place.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnConfigurationProfile",
+            "present": true,
+            "message": "The model routing is an AppConfig profile read at runtime, so the choice changes without a deploy."
+          },
+          {
+            "pattern": "model-routing",
+            "present": true,
+            "message": "The small-vs-large routing rule is configuration, tunable as the traffic is learned."
+          },
+          {
+            "pattern": "const MODEL_ID =",
+            "present": false,
+            "message": "The model id is not a hardcoded constant in the handler. That would make every routing tweak a code deploy."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "On-demand for this traffic shape",
+      "decision": "Which capacity mode fits lunchtime spikes and quiet nights — on-demand, priority, flex, or a reserved commitment.",
+      "why": "Traffic spikes at lunch and is almost quiet at night. On-demand fits that shape: you pay per request, scale with the spike, and pay nothing for the quiet. Priority is for when waiting is expensive and you will pay a premium for lower latency; flex is for work that can queue for a discount; a reserved commitment buys dedicated throughput and only pays off under steady high load or an uptime target that forces the commit. A flat reservation for the lunch peak would sit idle all night. Configuration: the lesson is matching capacity mode to the traffic shape. The losing choice is reserving for the peak without an uptime requirement, paying for capacity the quiet hours never use.",
+      "snippets": [
+        {
+          "label": "On-demand capacity for spiky, idle-at-night traffic. Reserved only if an uptime target forces the commit.",
+          "language": "typescript",
+          "source": "const capacity = {\n  mode: 'ON_DEMAND', // pay per request, scale with the lunch spike, nothing at night\n  // PRIORITY when waiting is expensive; FLEX when work can queue;\n  // RESERVED only if an uptime target requires the commitment.\n};"
+        }
+      ],
+      "infrastructure": "// On-demand fits lunchtime spikes and quiet nights: pay per request, scale with the spike, pay nothing for the quiet. Priority trades money for lower latency; flex trades latency for a discount; a reserved commitment pays off only under steady load or an uptime target. A flat reservation for the peak sits idle all night.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the capacity decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: on-demand for spiky, idle-at-night traffic, with reserved kept\n// for an uptime target that actually requires the commitment.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Capacity mode follows the traffic shape, not a preference for predictable\nbills. Spiky and idle: on-demand. The premium (priority) and discount\n(flex) modes trade latency against cost for specific needs. Reserved /\nprovisioned throughput is a commitment that only wins under sustained high\nutilization or a hard uptime SLA — the same logic as the overnight-claims\nbatch-vs-provisioned decision, from the real-time side.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "mode: 'ON_DEMAND'",
+            "present": true,
+            "message": "On-demand capacity matches spiky, idle-at-night traffic: scale with the spike, pay nothing for the quiet."
+          },
+          {
+            "pattern": "scale with the lunch spike",
+            "present": true,
+            "message": "The mode is chosen for the traffic shape, so the lunch peak scales without a night-long reservation."
+          },
+          {
+            "pattern": "mode: 'RESERVED'",
+            "present": false,
+            "message": "No flat reservation. Reserved only pays off under steady load or an uptime target; for this shape it sits idle all night."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "maxTokens on every call",
+      "decision": "Whether each call bounds its output, or an unset cap lets one turn run long.",
+      "why": "maxTokens is a cost and capacity control, not just a formatting one. A dispute turn with no cap can generate until the model decides to stop, and an unbounded response is how one turn becomes a surprising line on the bill — and, under the on-demand capacity above, how one caller's long generation reserves capacity a spike needs. Every call sets maxTokens to the length the turn actually needs. This is runnable: Converse with inferenceConfig maxTokens returns a bounded response. The losing choice is omitting maxTokens, which silently permits the longest answer the model will produce, exactly when traffic is heaviest.",
+      "snippets": [
+        {
+          "label": "maxTokens set on the call, bounding the reservation and the bill — not just the output length.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": \"explain my dispute options\"}]}],\n    inferenceConfig={\"maxTokens\": 512},\n)\nprint(out[\"usage\"][\"outputTokens\"])"
+        },
+        {
+          "label": "From the terminal, list the models to confirm the one you cap is callable in the Region.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+        }
+      ],
+      "infrastructure": "// maxTokens bounds every call. An unset cap lets a dispute turn run until the model stops, which is how one turn becomes a bill surprise and, under on-demand capacity, reserves capacity a spike needs. The cap is the length the turn needs, set on every call — a capacity control, not only a formatting one.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the capped Converse call from the snippets on the left, then\n# Run. The intercept returns a bounded response.\n#\n# The goal: maxTokens is set on the call, so one long turn cannot run\n# unbounded into the bill during a spike.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The same maxTokens decision as the policy assistant's Converse step, here\nwith the cost and capacity framing front and center. Dropping maxTokens\nraises no error — the call succeeds, the response is just as long as the\nmodel wants — which is the trap: the dangerous mistake has no exception.\nUnder spiky on-demand traffic, an unbounded generation is both a bill and a\ncapacity draw at the worst moment.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": { "message": { "role": "assistant", "content": [ { "text": "You can dispute a charge within 60 days by..." } ] } },
+              "stopReason": "max_tokens",
+              "usage": { "inputTokens": 120, "outputTokens": 512, "totalTokens": 632 }
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Exact cache for identical, semantic for FAQ only",
+      "decision": "Which requests use an exact cache, which use a semantic cache, and which must never be cached at all.",
+      "why": "An exact cache (ElastiCache) keyed on the full request is safe for byte-identical repeats. A semantic cache returns a stored answer for a question that is merely similar — and that is the trap: a balance question that is semantically close to another caller's balance question would return their balance. So the semantic cache is scoped to the shared FAQ only, where the answer is public and caller-independent. Account questions never touch the semantic cache. Configuration: the lesson is exact-for-identical, semantic-for-FAQ, never-semantic-for-account. The losing choice is a semantic cache over everything, where a semantic hit on a balance question is the disclosure incident the scenario is built against.",
+      "snippets": [
+        {
+          "label": "Exact cache for identical requests; semantic cache scoped to FAQ intents only; account questions excluded.",
+          "language": "typescript",
+          "source": "const cachePolicy = {\n  exact: { store: 'ELASTICACHE', keyedOn: 'full-request' },\n  semantic: { enabledFor: ['faq'], neverFor: ['account', 'balance'] },\n  // A semantic hit on a balance question would return another caller's balance.\n};"
+        }
+      ],
+      "infrastructure": "// Exact cache (ElastiCache) for byte-identical requests is always safe. A semantic cache returns an answer for a similar question, so it is scoped to the public FAQ only — account and balance questions are never semantically cached. A semantic hit on a balance question returns another caller's balance, which is the disclosure incident.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the cache policy from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: exact cache for identical requests, semantic cache for the FAQ\n// only, and no semantic cache for account or balance questions.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two caches, two safety profiles. Exact cache is keyed on the whole request,\nso a hit is genuinely the same request — safe for anything. Semantic cache\nmatches on similarity, which is a feature for 'what are your hours' phrased\nfive ways and a disclosure for 'what is my balance,' because two callers'\nbalance questions are semantically near-identical. The scoping is the whole\nsafety argument.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "ELASTICACHE",
+            "present": true,
+            "message": "An exact cache keyed on the full request is safe for byte-identical repeats."
+          },
+          {
+            "pattern": "neverFor: ['account', 'balance']",
+            "present": true,
+            "message": "Account and balance questions are excluded from the semantic cache, so a similar question never returns another caller's data."
+          },
+          {
+            "pattern": "enabledFor: ['faq']",
+            "present": true,
+            "message": "The semantic cache is scoped to the public FAQ, where answers are caller-independent and a similarity match is safe."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "CloudFront only for public answers",
+      "decision": "Whether edge caching is applied to all answers, or only to the public, non-personalized ones.",
+      "why": "CloudFront caches at the edge, which is the same disclosure risk as the semantic cache moved closer to the caller: a cached account answer served from the edge is one caller's balance handed to whoever hits that cache key next. So the edge caches only public, non-personalized answers — the FAQ, static help content — and account responses are marked no-store so they never sit in an edge cache. Configuration: the lesson is edge caching for public answers only. The losing choice is a blanket cache policy that treats an account answer like a static page, which is the balance-disclosure incident at the edge.",
+      "snippets": [
+        {
+          "label": "Edge caching for public paths; account responses marked no-store so they are never cached at the edge.",
+          "language": "typescript",
+          "source": "const behaviors = {\n  '/faq/*': { cachePolicy: 'CACHE_PUBLIC' },\n  '/account/*': { cachePolicy: 'NO_STORE' }, // never cached at the edge\n};"
+        }
+      ],
+      "infrastructure": "// CloudFront caches only public, non-personalized answers — the FAQ, static help. Account responses are no-store, so they never sit in an edge cache. A cached account answer at the edge is one caller's balance served to the next cache-key hit — the semantic-cache disclosure, moved to the edge.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the edge cache behaviors from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: public paths cache at the edge, account paths are no-store, so\n// a balance never sits in a CloudFront cache.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The edge is just another cache, and every caching layer in this scenario\nhas the same rule: public and caller-independent may be cached, personal\nmay not. CloudFront behaviors are path-scoped, so /faq/* can cache while\n/account/* is explicitly no-store. This is the serverless-standards caching\nrule — a thing that must not be cached needs an explicit no-store policy,\nnot merely a short TTL.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "'/account/*'",
+            "present": true,
+            "message": "Account paths have their own behavior set to no-store, so a balance never sits in an edge cache."
+          },
+          {
+            "pattern": "NO_STORE",
+            "present": true,
+            "message": "Account responses are explicitly no-store, not merely short-TTL — the cache boundary is a disclosure boundary."
+          },
+          {
+            "pattern": "'/faq/*'",
+            "present": true,
+            "message": "Public FAQ paths cache at the edge, where the answer is caller-independent and safe to reuse."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "DynamoDB session, old turns summarized",
+      "decision": "Whether the full transcript is replayed every turn, or the session is stored with old turns summarized.",
+      "why": "A support conversation accumulates turns, and replaying the whole transcript on every call grows the input tokens and latency each turn and eventually overflows the context. The session lives in DynamoDB, and old turns are summarized into a running summary rather than kept verbatim — the model gets the summary plus the recent turns, not the entire history. Configuration: the lesson is the summarized session, not a full replay. The losing choice is replaying the complete transcript, which is the lost-in-the-middle and token-growth failure that gets worse the longer the caller stays.",
+      "snippets": [
+        {
+          "label": "A DynamoDB session table holding a running summary plus recent turns, not the full transcript.",
+          "language": "typescript",
+          "source": "const session = new Table(this, 'ChatSession', {\n  partitionKey: { name: 'sessionId', type: AttributeType.STRING },\n  billingMode: BillingMode.PAY_PER_REQUEST,\n  timeToLiveAttribute: 'ttl',\n});\n// Item holds: runningSummary + last N turns. Not the whole transcript."
+        }
+      ],
+      "infrastructure": "// The session is in DynamoDB, holding a running summary plus the last N turns, not the full transcript. Replaying the whole history every call grows tokens and latency each turn and eventually overflows the context. The summary keeps the thread without re-sending everything the caller ever said.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the session table from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the session holds a running summary plus recent turns, so the\n// full transcript is not replayed on every call.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The same session-summarization decision as the benefits-agent memory step,\nhere as an explicit DynamoDB table with a TTL. The item carries a running\nsummary and the last few turns; the summary is updated as turns age out.\nThis bounds the per-turn input regardless of conversation length, which\nkeeps latency and cost flat instead of climbing the longer a caller stays.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "runningSummary",
+            "present": true,
+            "message": "The session holds a running summary plus recent turns, so old turns are summarized rather than replayed verbatim."
+          },
+          {
+            "pattern": "timeToLiveAttribute",
+            "present": true,
+            "message": "A TTL expires abandoned sessions, keeping the table to live conversations."
+          },
+          {
+            "pattern": "Not the whole transcript",
+            "present": true,
+            "message": "The full transcript is not stored or replayed — the summary bounds the per-turn input regardless of conversation length."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Summarize the middle, keep the ends",
+      "decision": "When a transcript is long, what is kept verbatim and what is summarized.",
+      "why": "Models attend worst to the middle of a long context — lost-in-the-middle. So when a transcript grows, the instruction (the start) and the latest turn (the end) stay verbatim, because they matter most and are attended to best, and the middle turns are what gets summarized. Summarizing the ends to save the middle would be backwards: you would compress the two things the model reads most reliably and keep the part it half-ignores. Configuration: the lesson is summarize-the-middle. The losing choice is a naive oldest-first truncation or summarizing the latest turn, both of which drop or dilute the content the model actually uses.",
+      "snippets": [
+        {
+          "label": "Keep the instruction and the latest turn verbatim; summarize the middle turns.",
+          "language": "typescript",
+          "source": "function compact(turns) {\n  const head = turns[0];            // the instruction — kept verbatim\n  const tail = turns.slice(-2);     // the latest turns — kept verbatim\n  const middle = summarize(turns.slice(1, -2)); // the middle — summarized\n  return [head, middle, ...tail];\n}"
+        }
+      ],
+      "infrastructure": "// Lost-in-the-middle: models attend worst to the center of a long context. So the instruction (start) and the latest turn (end) stay verbatim, and the middle is summarized. Summarizing the ends to keep the middle is backwards — it compresses what the model reads most reliably and keeps what it half-ignores.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the compaction rule from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: keep the instruction and the latest turn verbatim and summarize\n// the middle, because the middle is what the model attends to worst.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Lost-in-the-middle is a measured property of long-context attention: recall\nis highest at the start and end and sags in the middle. The compaction\nfollows the attention curve — protect the ends, compress the middle. This\nis distinct from the session-summary step: that bounds total length; this\ndecides WHICH content survives when you must cut, the reverse of a naive\n'drop the oldest.'\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "summarize(turns.slice(1, -2))",
+            "present": true,
+            "message": "The middle turns are summarized, because that is where the model's attention is weakest."
+          },
+          {
+            "pattern": "kept verbatim",
+            "present": true,
+            "message": "The instruction and the latest turns are kept verbatim — the content the model attends to most reliably."
+          },
+          {
+            "pattern": "const tail = turns.slice(-2)",
+            "present": true,
+            "message": "The latest turns are preserved at the end, so the most recent context is never the part that gets compressed."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Measure time to first token apart from retrieval",
+      "decision": "Whether latency is one number, or time to first token and retrieval time are measured separately.",
+      "why": "Two different waits hide in 'it feels slow.' Time to first token is how long until the model starts streaming; retrieval time is how long the search took before the model was even called. They have different fixes — a faster model helps the first, a better index helps the second — so measuring them as one number sends you optimizing the wrong thing. If you only track total latency, you will 'speed up the model' when the wait was actually the search. This is a diagnosis step: the sandbox cannot produce real timings, so the lesson is the separate measurement. The losing move is a single latency metric that cannot tell you which wait to fix.",
+      "snippets": [
+        {
+          "label": "Two timers, two waits: retrieval time and time to first token, recorded separately.",
+          "language": "python",
+          "source": "# One 'slow' is two different waits with two different fixes:\n#   retrieval_ms    -> fix the index / the query, not the model\n#   ttft_ms         -> fix the model / the prompt size, not the search\n# Measured as one number, you optimize the wrong one.\nimport time\nt0 = time.time()\n# ... retrieval ...\nretrieval_ms = (time.time() - t0) * 1000\n# ... first streamed token ...\nttft_ms = (time.time() - t0) * 1000 - retrieval_ms"
+        }
+      ],
+      "infrastructure": "// Time to first token and retrieval time are different waits with different fixes: a faster model helps TTFT, a better index helps retrieval. Measured as one latency number, you cannot tell which to fix and will 'speed up the model' when the wait was the search. Record them separately.",
+      "workbench": {
+        "open": "diagnosis.py",
+        "files": [
+          {
+            "path": "diagnosis.py",
+            "body": "# Assemble the two-timer measurement from the snippet on the left. This is\n# a diagnosis step: real timings cannot be reproduced in the sandbox, so\n# the lesson is measuring the two waits apart.\n#\n# The goal: retrieval time and time to first token as separate metrics, so\n# the fix targets the actual wait.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Perceived latency has sources that need different fixes, and a single\nmetric averages them into a number you cannot act on. Time to first token\nis the streaming start — model and prompt size drive it. Retrieval time is\nthe pre-model search — index and query drive it. The classic wrong move is\nswapping to a faster model to fix a slowness that was entirely the vector\nsearch, which the separate metric would have shown immediately.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "retrieval_ms",
+            "present": true,
+            "message": "Retrieval time is measured on its own — the wait a better index or query fixes."
+          },
+          {
+            "pattern": "ttft_ms",
+            "present": true,
+            "message": "Time to first token is measured separately — the wait a faster model or smaller prompt fixes."
+          },
+          {
+            "pattern": "optimize the wrong one",
+            "present": true,
+            "message": "One combined number hides which wait to fix, so you optimize the wrong one — the reason the two are measured apart."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Adaptive retry, and AccessDenied is not retried",
+      "decision": "How a spike's throttles are handled, and which errors are never retried.",
+      "why": "A spike that meets ThrottlingException and retries immediately turns into a retry storm — every throttled call retries at once, multiplying the load that caused the throttle. Adaptive retry with jitter backs off and spreads the retries, so the spike degrades instead of amplifying. And not every error is retryable: AccessDeniedException is a permission decision, and retrying a denied call does not turn a deny into an allow — it just wastes calls and hides the real problem. This is runnable: an AccessDenied from the intercept is surfaced, not retried. The losing choice is a blanket retry-everything with no backoff, which both storms on throttles and pointlessly retries denials.",
+      "snippets": [
+        {
+          "label": "Adaptive retry mode with jitter for throttles; the botocore config that spreads retries instead of storming.",
+          "language": "python",
+          "source": "import boto3\nfrom botocore.config import Config\n\ncfg = Config(retries={\"mode\": \"adaptive\", \"max_attempts\": 4})\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\", config=cfg)"
+        },
+        {
+          "label": "AccessDenied is not retried — it is a permission decision. Catch it and surface it rather than retrying into the wall.",
+          "language": "python",
+          "source": "try:\n    out = runtime.converse(modelId=MODEL, messages=MESSAGES)\nexcept runtime.exceptions.AccessDeniedException:\n    # Retrying a denied call does not become an allow. Surface it.\n    raise"
+        },
+        {
+          "label": "From the terminal, list the models to confirm the client and Region before debugging a throttle or a denial.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+        }
+      ],
+      "infrastructure": "// Adaptive retry with jitter backs off and spreads throttled calls, so a spike degrades instead of storming — immediate retries multiply the load that caused the throttle. AccessDeniedException is never retried: a deny is a permission decision, and retrying it wastes calls and hides the real cause. Retryable and non-retryable errors are handled differently on purpose.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the adaptive-retry client and the AccessDenied handling from the\n# snippets on the left, then Run. The intercept surfaces a denial rather\n# than retrying it.\n#\n# The goal: throttles back off with jitter, and a denied call is surfaced,\n# not retried into the wall.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two retry lessons in one. First, adaptive mode (botocore's retries mode)\nadds backoff, jitter, and client-side rate limiting, which turns a throttle\nspike into graceful degradation instead of a storm. Second, the\nretry/no-retry split: ThrottlingException and 5xx are retryable;\nAccessDeniedException and ValidationException are not, because the call is\nwrong in a way a retry cannot fix. Retrying a denial is the anti-pattern.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": { "message": { "role": "assistant", "content": [ { "text": "Here is how to reach support." } ] } },
+              "stopReason": "end_turn"
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Cut the context in order, model last",
+      "decision": "When the context window overflows, what is cut first and what is cut last.",
+      "why": "A context overflow has a right order to cut, and a bigger model is the last resort, not the first. Cut tool output first (often verbose and partly redundant), then history (already summarized), then retrieved chunks (keep the top few), then few-shot examples (nice-to-have), and only then reach for a larger-context model. Reaching for the bigger model first spends money and latency to avoid a triage you should do anyway. Done means a context overflow cuts tool output before it cuts the question — the caller's actual question is never what gets dropped. Configuration: the lesson is the cut order. The losing choice is dropping the question or jumping straight to a larger model.",
+      "snippets": [
+        {
+          "label": "The cut order when the window overflows: tool output, history, chunks, few-shot, then a larger model last.",
+          "language": "typescript",
+          "source": "const cutOrder = [\n  'tool_output',   // verbose, partly redundant — cut first\n  'history',       // already summarized — cut next\n  'chunks',        // keep the top few\n  'few_shot',      // nice-to-have\n  'larger_model',  // last resort, not first\n];\n// The caller's question is never in this list. It is never cut."
+        }
+      ],
+      "infrastructure": "// Context overflow is cut in order: tool output (verbose, redundant), then history (already summarized), then chunks (keep the top few), then few-shot, and only then a larger-context model. The question is never cut. Reaching for a bigger model first spends money and latency to skip a triage you should do regardless.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the cut-order policy from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: an overflow cuts tool output first and a larger model last, and\n// never cuts the caller's question.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The cut order is a priority list for the context budget, lowest-value\nfirst. Tool output is often the biggest and most redundant, so it goes\nfirst; the question is highest-value, so it is never on the list. A larger\nmodel is last because it is the expensive option that papers over a budget\nproblem you can usually solve by cutting low-value content. This closes the\nscenario: Done means an overflow cuts tool output before the question.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "'tool_output'",
+            "present": true,
+            "message": "Tool output is cut first — verbose and partly redundant, the lowest-value content in the budget."
+          },
+          {
+            "pattern": "last resort, not first",
+            "present": true,
+            "message": "A larger model is the last cut, not the first — it is the expensive option that papers over a triage you should do anyway."
+          },
+          {
+            "pattern": "question is never",
+            "present": true,
+            "message": "The caller's question is never cut. An overflow cuts tool output before it cuts the question, which is the Done means."
+          }
+        ]
+      }
+    }
+  ]
+}

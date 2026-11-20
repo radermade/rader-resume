@@ -1,0 +1,761 @@
+{
+  "schemaVersion": 1,
+  "id": "clinical-intake",
+  "name": "Clinical intake",
+  "summary": "A streamed clinical note where a national identifier must never reach the screen, the log, or the chart, and a person accepts before anything is written.",
+  "brief": {
+    "whoIsAsking": "A clinician typing a situation and reading the note as it streams, who accepts the note before anything is written to the chart.",
+    "whatTheyNeedBack": "A streamed note with no national identifier ever shown, an email anonymized rather than deleted so the sentence still makes sense, and nothing written to the chart until they accept.",
+    "systemsAlreadyRunning": "A chart system of record that a person writes to on acceptance. An auditor later asks which user invoked the model and which chart excerpt a sentence came from. This is not a model-training project.",
+    "breaksWhen": "The identifier reaches the screen, the log, or the chart. It cannot be unseen, and a filter applied after the fact is an admission the requirement was never met.",
+    "doneMeans": "The identifier never appears in the stream, the email is anonymized rather than deleted, the chart updates only after a person accepts, and an auditor can tie the call to a user and a source excerpt."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "clinician", "label": "Clinician (stream + accept)", "flowsTo": ["gateway"] },
+          { "id": "gateway", "label": "API Gateway (streaming)", "icon": "api-gateway", "group": "acct", "flowsTo": ["lambda"] },
+          { "id": "lambda", "label": "AWS Lambda", "icon": "lambda", "group": "acct", "flowsTo": ["guardrail", "bedrock"] },
+          { "id": "guardrail", "label": "Bedrock Guardrail", "group": "acct" },
+          { "id": "bedrock", "label": "Amazon Bedrock", "icon": "bedrock", "group": "acct" },
+          { "id": "a2i", "label": "Augmented AI (accept)", "group": "acct", "flowsTo": ["chart"] },
+          { "id": "chart", "label": "Chart (system of record)", "group": "acct" },
+          { "id": "logs", "label": "Invocation logs (CMK)", "icon": "iam", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Content filters, a denied topic, and word filters",
+      "decision": "Which guardrail policies cover which risks, and why the identifier is not one a word filter can catch.",
+      "why": "A guardrail layers several policies, each for a different risk. Content filters cover categories (hate, violence, sexual, misconduct) by classification. A denied topic blocks a subject you define in natural language. Word filters block exact strings policy can enumerate — profanity, a competitor name. The national identifier is none of these: it is a pattern, not a listable word, so a word filter cannot catch it and the next step's PII handling must. Configuration: the lesson is which policy covers which risk, and that the identifier needs a different mechanism than a word list. The losing choice is trying to block the identifier with a word filter, which cannot enumerate every possible number.",
+      "snippets": [
+        {
+          "label": "A guardrail with content filters, a denied topic, and word filters — each for a different class of risk.",
+          "language": "typescript",
+          "source": "const guardrail = new CfnGuardrail(this, 'IntakeGuardrail', {\n  name: 'clinical-intake',\n  contentPolicyConfig: { filtersConfig: [ { type: 'VIOLENCE', inputStrength: 'HIGH', outputStrength: 'HIGH' } ] },\n  topicPolicyConfig: { topicsConfig: [ { name: 'non-clinical-advice', type: 'DENY', definition: 'advice outside the clinical scope' } ] },\n  wordPolicyConfig: { wordsConfig: [ { text: 'competitor-name' } ] },\n});"
+        }
+      ],
+      "infrastructure": "// The guardrail layers policies by risk class: content filters classify categories, a denied topic blocks a subject defined in words, word filters block exact strings policy can enumerate. The national identifier is a pattern, not a listable word, so no word filter catches it — the next step's PII entity handling must. Each policy covers what the others cannot.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the guardrail policies from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: content filters, a denied topic, and word filters each cover\n// their own risk — and the identifier is left to PII handling, not a word\n// list.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The policies are not interchangeable. Content filters are classifiers over\ncategories; a denied topic is a natural-language subject boundary; word\nfilters are exact-string blocks. The identifier is the one that does not\nfit any of them — you cannot list every national id number — which is\nexactly why the PII entity policy (next steps) exists. Trying to force the\nidentifier into a word filter is the common mistake this step pre-empts.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "contentPolicyConfig",
+            "present": true,
+            "message": "Content filters classify category risks (violence, hate, etc.) — the policy for things a classifier catches."
+          },
+          {
+            "pattern": "topicPolicyConfig",
+            "present": true,
+            "message": "A denied topic blocks a subject defined in natural language — the policy for a boundary you describe rather than enumerate."
+          },
+          {
+            "pattern": "wordPolicyConfig",
+            "present": true,
+            "message": "Word filters block exact strings policy can list. The identifier is not listable, so it is left to PII entity handling, not this policy."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "BLOCK the identifier, ANONYMIZE the email",
+      "decision": "Whether one PII action handles both the identifier and the email, or each gets the action its requirement needs.",
+      "why": "The requirements differ, so the actions differ. The national identifier must not appear at all — its PII entity is set to BLOCK, which stops the response rather than letting the value through in any form. The email can be replaced with a placeholder, because the rest of the sentence ('contact the patient at {EMAIL}') still has to make sense — its entity is set to ANONYMIZE, which masks the value while keeping the sentence usable. One action cannot do both jobs: BLOCK the email and you lose the sentence; ANONYMIZE the identifier and a masked-but-present value is still an admission it was there. Configuration: the lesson is per-entity actions. The losing choice is one blanket action for all PII.",
+      "snippets": [
+        {
+          "label": "Per-entity PII actions: BLOCK the identifier, ANONYMIZE the email. The requirement picks the action.",
+          "language": "typescript",
+          "source": "const piiConfig = {\n  piiEntitiesConfig: [\n    { type: 'CA_SOCIAL_INSURANCE_NUMBER', action: 'BLOCK' },\n    { type: 'EMAIL', action: 'ANONYMIZE' },\n  ],\n};\n// BLOCK: the identifier must not appear at all. ANONYMIZE: the email is\n// masked but the sentence still reads."
+        }
+      ],
+      "infrastructure": "// The identifier's PII entity is BLOCK — the response is stopped rather than letting the value through. The email's is ANONYMIZE — masked to a placeholder so 'contact the patient at {EMAIL}' still reads. One blanket action cannot serve both: BLOCK the email and the sentence breaks; ANONYMIZE the identifier and a masked-but-present value is still an admission it was there.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the per-entity PII config from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: BLOCK for the identifier that must not appear at all, ANONYMIZE\n// for the email the sentence still needs.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "BLOCK and ANONYMIZE are different promises. BLOCK stops the whole response\nif the entity appears — the right action for something that must never be\nseen in any form. ANONYMIZE replaces the value with a typed placeholder\nand lets the response through — right for something the sentence needs\nstructurally but not literally. The identifier and the email have opposite\nrequirements, so they get opposite actions; a single action fails one of\nthem.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "action: 'BLOCK'",
+            "present": true,
+            "message": "The identifier's entity is BLOCK: the response is stopped, so the value never appears in any form."
+          },
+          {
+            "pattern": "action: 'ANONYMIZE'",
+            "present": true,
+            "message": "The email's entity is ANONYMIZE: masked to a placeholder so the sentence still reads, rather than blocked."
+          },
+          {
+            "pattern": "piiEntitiesConfig",
+            "present": true,
+            "message": "PII actions are set per entity type, so the identifier and the email each get the action its requirement needs."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Contextual grounding against the chart",
+      "decision": "Whether the note is checked for grounding against the chart excerpts, and at what threshold.",
+      "why": "A fluent note that is not supported by the chart is a confabulation in a medical record — the worst kind of wrong. Contextual grounding checks the generated note against the retrieved chart excerpts: it scores how much of the note is actually supported by the source, and blocks or flags a note that drifts beyond it. Thresholds start near 0.7 and tune — too high blocks good notes, too low lets unsupported claims through. Configuration: the lesson is the grounding policy against the chart, with a starting threshold. The losing choice is no grounding check, which lets a plausible-sounding but unsupported sentence into a clinical note the clinician may accept under time pressure.",
+      "snippets": [
+        {
+          "label": "A contextual grounding filter against the chart excerpts, with a starting threshold near 0.7.",
+          "language": "typescript",
+          "source": "const grounding = {\n  contextualGroundingPolicyConfig: {\n    filtersConfig: [\n      { type: 'GROUNDING', threshold: 0.7 },\n      { type: 'RELEVANCE', threshold: 0.7 },\n    ],\n  },\n};"
+        }
+      ],
+      "infrastructure": "// Contextual grounding scores the note against the retrieved chart excerpts and blocks a note that drifts beyond what the source supports. Thresholds start near 0.7 and tune: too high blocks good notes, too low lets unsupported claims through. A fluent, unsupported sentence in a clinical record is the confabulation this catches.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the grounding filter from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the note is checked against the chart excerpts, so a fluent but\n// unsupported sentence is caught before the clinician accepts it.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Grounding needs the sources tagged so the filter knows what the note is\nmeant to be supported by — the chart excerpts are the grounding source, the\nnote is the thing checked. The 0.7 start is a convention, not a law; the\nright value comes from tuning against real notes. This is the same\ncontextual-grounding policy the policy assistant uses, here on a medical\nrecord where an unsupported claim is especially dangerous.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "GROUNDING",
+            "present": true,
+            "message": "A grounding filter scores the note against the chart excerpts, catching a note that drifts beyond the source."
+          },
+          {
+            "pattern": "threshold: 0.7",
+            "present": true,
+            "message": "The threshold starts near 0.7 and is tuned — too high blocks good notes, too low lets unsupported claims through."
+          },
+          {
+            "pattern": "contextualGroundingPolicyConfig",
+            "present": true,
+            "message": "Grounding is a guardrail policy against the retrieved chart, so an unsupported sentence is caught before the clinician accepts it."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "ApplyGuardrail before any model call",
+      "decision": "Whether the guardrail runs on the input before the model, or only on the output after.",
+      "why": "The requirement is that the model must not see the raw identifier — not that the output is filtered. A filter on the output is too late: the model already received the identifier, and the invocation log already holds it. ApplyGuardrail runs the guardrail on the input text as a standalone call, before any model call, so a note containing the identifier is blocked before the model (or the log) ever sees it. This is runnable: ApplyGuardrail on input with a blocked entity returns a GUARDRAIL_INTERVENED action. The losing choice is relying only on output filtering, which cannot meet 'the model must not see the raw value' — by the time the output is filtered, the model saw it and the log recorded it.",
+      "snippets": [
+        {
+          "label": "ApplyGuardrail on the input as a standalone pre-check, before any model call.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.apply_guardrail(\n    guardrailIdentifier=\"GR12345678\",\n    guardrailVersion=\"3\",\n    source=\"INPUT\",\n    content=[{\"text\": {\"text\": note_with_identifier, \"qualifiers\": [\"guard_content\"]}}],\n)\nprint(out[\"action\"])  # GUARDRAIL_INTERVENED when the identifier is present"
+        },
+        {
+          "label": "From the terminal, confirm the guardrail and version exist before the pre-check depends on them — get-guardrail shows its status.",
+          "language": "shell",
+          "source": "aws bedrock get-guardrail --guardrail-identifier GR12345678 --guardrail-version 3"
+        }
+      ],
+      "infrastructure": "// ApplyGuardrail runs the guardrail on the input as a standalone call before any model call, so a note containing the identifier is blocked before the model or the log sees it. Output-only filtering is too late for 'the model must not see the raw value' — by then the model received it and the invocation log recorded it.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the ApplyGuardrail pre-check from the snippets on the left, then\n# Run. The intercept returns GUARDRAIL_INTERVENED for a note with the\n# identifier.\n#\n# The goal: the guardrail runs on the input before any model call, so the\n# model never sees the raw identifier.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "ApplyGuardrail is the independent guardrail API: it evaluates text without\na model call, which is exactly what 'the model must not see the raw value'\nrequires. The action field is NONE or GUARDRAIL_INTERVENED. This is the\npre-check; the next step applies the guardrail on the live chat turn too.\nBoth matter — the pre-check keeps the identifier out of the model and the\nlog, the chat-turn guardrail covers the generated output.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "ApplyGuardrail",
+            "body": {
+              "action": "GUARDRAIL_INTERVENED",
+              "outputs": [ { "text": "The note contains a blocked identifier and was stopped before the model call." } ],
+              "assessments": [ { "topicPolicy": {}, "sensitiveInformationPolicy": { "piiEntities": [ { "type": "CA_SOCIAL_INSURANCE_NUMBER", "action": "BLOCKED" } ] } } ]
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "GetGuardrail",
+            "body": { "guardrailId": "GR12345678", "name": "clinical-intake", "version": "3", "status": "READY" }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "guardrailConfig on the live chat turn",
+      "decision": "Whether the chat turn carries its own guardrailConfig, or the pre-check is assumed to cover the generated output too.",
+      "why": "The pre-check (ApplyGuardrail on input) covers what goes in; it does not cover what the model generates. The live Converse turn carries its own guardrailConfig so the output is evaluated too — a generated sentence that drifts off the chart, or somehow surfaces a value, is caught on the way out. This is the live call, not a second copy of the pre-check: the pre-check guards the input as a standalone step, the guardrailConfig guards the generation inline. This is runnable: Converse with guardrailConfig returns a response assessed by the guardrail. The losing choice is assuming the input pre-check covers the output, leaving the generated note unguarded.",
+      "snippets": [
+        {
+          "label": "The chat turn carries guardrailConfig, so the generated output is evaluated, not only the input.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-runtime\", region_name=\"eu-central-1\")\n\nout = runtime.converse(\n    modelId=\"eu.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    messages=[{\"role\": \"user\", \"content\": [{\"text\": safe_input, \"guardContent\": {}}]}],\n    guardrailConfig={\"guardrailIdentifier\": \"GR12345678\", \"guardrailVersion\": \"3\"},\n)\nprint(out[\"stopReason\"])"
+        },
+        {
+          "label": "From the terminal, list the models to confirm the Converse model id is callable with the guardrail attached.",
+          "language": "shell",
+          "source": "aws bedrock list-foundation-models --by-output-modality TEXT"
+        }
+      ],
+      "infrastructure": "// The Converse turn carries guardrailConfig so the generated output is evaluated, not only the input the pre-check handled. The pre-check guards what goes in as a standalone call; the guardrailConfig guards the generation inline. Assuming the input pre-check covers the output leaves the generated note unguarded.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the guarded chat turn from the snippets on the left, then Run.\n# The intercept returns a response assessed by the guardrail.\n#\n# The goal: the live turn carries guardrailConfig, so the generated output\n# is guarded in addition to the input pre-check.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two applications of the same guardrail, two jobs. ApplyGuardrail on the\ninput (previous step) keeps the identifier out of the model. guardrailConfig\non the Converse turn evaluates the generation on the way out. They are not\nredundant — one guards input, one guards output — and the requirement\nneeds both: the raw value out of the model, and the generated note checked\nfor grounding and leakage.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-runtime",
+            "operation": "Converse",
+            "body": {
+              "output": { "message": { "role": "assistant", "content": [ { "text": "Patient reports a two-day history of fever; contact the patient at {EMAIL}." } ] } },
+              "stopReason": "end_turn"
+            }
+          },
+          {
+            "service": "bedrock",
+            "operation": "ListFoundationModels",
+            "body": { "modelSummaries": [ { "modelId": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", "providerName": "Anthropic" } ] }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "guardContent keeps the trusted text out",
+      "decision": "Which parts of the prompt the guardrail evaluates, and why the system instruction is not one of them.",
+      "why": "A guardrail should evaluate the untrusted content — the user text, the tool results, the retrieved chunks — not your own trusted system instruction. Marking the untrusted parts with guardContent tells the guardrail what to assess; the system prompt is left out because guarding your own instruction throws away the turn: the guardrail may object to the very text that tells it how to behave, or waste the evaluation on content that was never the risk. Configuration: the lesson is scoping the guard to untrusted content. The losing choice is guarding everything including the system prompt, which both wastes evaluation and can trip the guardrail on its own instructions.",
+      "snippets": [
+        {
+          "label": "Mark the untrusted content with guardContent; leave the trusted system instruction unmarked.",
+          "language": "typescript",
+          "source": "// The user text, tool results, and retrieved chunks are guarded:\nconst userBlock = { text: userText, guardContent: {} };\nconst chunkBlock = { text: retrievedChunk, guardContent: {} };\n// The system instruction is NOT marked — guarding your own instruction\n// throws away the turn."
+        }
+      ],
+      "infrastructure": "// guardContent marks the untrusted content — user text, tool results, retrieved chunks — as what the guardrail evaluates. The trusted system instruction is left unmarked, because guarding your own instruction wastes the evaluation on text that was never the risk and can trip the guardrail on its own behavior-defining prompt.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the guardContent marking from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the guardrail evaluates the untrusted user text and chunks, not\n// the trusted system instruction.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "guardContent is how you scope a guardrail to the risky parts. The threat is\nin the user's input, the retrieved chunks (indirect injection), and tool\nresults — not in your own system prompt, which you wrote and trust. Marking\neverything including the system text means the guardrail evaluates its own\ninstructions, which wastes the check and can cause spurious interventions.\nGuard the untrusted, trust the trusted.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "guardContent: {}",
+            "present": true,
+            "message": "The untrusted user text and chunks are marked with guardContent, so the guardrail evaluates them."
+          },
+          {
+            "pattern": "NOT marked",
+            "present": true,
+            "message": "The system instruction is left unmarked, because guarding your own trusted instruction throws away the turn."
+          },
+          {
+            "pattern": "retrievedChunk",
+            "present": true,
+            "message": "The retrieved chunks are guarded too, since indirect injection rides in the corpus, not only the user's text."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "sync on the stream, not async",
+      "decision": "Whether the streaming guardrail runs in sync mode, evaluating before tokens reach the clinician, or async.",
+      "why": "The clinician is reading the note as it streams. In async mode the guardrail evaluates chunks in the background while tokens are already on screen — so the identifier would be emitted and then flagged, and the clinician would already have read it. The requirement is that the identifier never appears, which only sync mode can meet: sync evaluates each chunk before it is released to the stream, holding a chunk until the guardrail clears it. Configuration: the lesson is streamProcessingMode SYNC. The losing choice is async for lower latency, which trades the one guarantee the scenario cannot give up — the identifier reaching the screen is the Breaks when.",
+      "snippets": [
+        {
+          "label": "Sync stream processing, so each chunk is evaluated before it reaches the clinician.",
+          "language": "typescript",
+          "source": "const streamConfig = {\n  guardrailConfig: {\n    guardrailIdentifier: intakeGuardrailArn,\n    guardrailVersion: '3',\n    streamProcessingMode: 'sync', // evaluate before release, never after\n  },\n};\n// async would emit the chunk and flag it after — too late."
+        }
+      ],
+      "infrastructure": "// streamProcessingMode sync evaluates each chunk before it is released to the stream, holding it until the guardrail clears it. async evaluates in the background while tokens are already on screen — the identifier would be emitted and then flagged, which the clinician has already read. sync is the only mode that meets 'the identifier never appears.'",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the sync stream config from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the streaming guardrail runs in sync mode, so a chunk is\n// cleared before the clinician can read it.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "sync vs async streaming is a latency-vs-safety trade, and here safety is\nnon-negotiable. async lets tokens flow and checks them in parallel, lower\nlatency but the chunk is already visible when flagged. sync holds each\nchunk for evaluation before release, slightly slower but the identifier is\nnever on screen. For a requirement phrased as 'never appears,' async is\ndisqualified — it appears, then disappears, and appearing was the failure.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "streamProcessingMode: 'sync'",
+            "present": true,
+            "message": "Sync stream processing evaluates each chunk before release, so the identifier is cleared before the clinician can read it."
+          },
+          {
+            "pattern": "evaluate before release",
+            "present": true,
+            "message": "A chunk is held until the guardrail clears it, which is what 'the identifier never appears' requires."
+          },
+          {
+            "pattern": "streamProcessingMode: 'async'",
+            "present": false,
+            "message": "Not async. Async emits the chunk and flags it after — the clinician has already read the identifier, which is the Breaks when."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Guardrail trace off in production",
+      "decision": "Whether guardrail trace stays on in production, given the trace records the sensitive span it matched.",
+      "why": "Guardrail trace is how you debug why the guardrail intervened — it returns the matched span, which for this guardrail is the national identifier it just blocked. So the trace is the one place the identifier leaves after you blocked it in the answer: you stopped it reaching the clinician, then logged it in the trace. Trace is on in dev to tune the guardrail and off in production. Configuration: the lesson is guardrail trace off in production. The losing choice is leaving trace on, which re-introduces the exact value the guardrail exists to suppress, into the logs, after every intervention.",
+      "snippets": [
+        {
+          "label": "Guardrail trace enabled only outside production. The trace holds the matched identifier.",
+          "language": "typescript",
+          "source": "const trace = stage === 'prod' ? 'disabled' : 'enabled';\n// The trace returns the span the guardrail matched — the identifier it\n// blocked. On in dev to tune; off in prod so the value does not leave via\n// the trace."
+        }
+      ],
+      "infrastructure": "// Guardrail trace returns the matched span — the identifier the guardrail just blocked — so leaving it on in production re-introduces the exact value you suppressed, into the logs, after every intervention. Trace is on in dev to tune the guardrail and off in production. It is the one place a blocked value leaks back.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the trace setting from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: guardrail trace on in dev, off in prod, because the trace holds\n// the identifier the guardrail matched.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The recurring trace rule, at its sharpest here. A guardrail that blocks an\nidentifier then writes that identifier into its trace has moved the leak,\nnot closed it. On in dev, off in prod. The same discipline as the member-\nservices agent trace and the policy assistant's guardrail trace: the trace\nis a debugging aid that necessarily contains the sensitive thing it traced.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "stage === 'prod' ? 'disabled'",
+            "present": true,
+            "message": "Guardrail trace is disabled in production, so the matched identifier does not leave via the trace."
+          },
+          {
+            "pattern": "off in prod",
+            "present": true,
+            "message": "Trace is on in dev to tune and off in prod, because the trace holds the identifier the guardrail blocked."
+          },
+          {
+            "pattern": "trace = 'enabled'",
+            "present": false,
+            "message": "Trace is not hardcoded on. It is tied to the stage, so production gets it off and the blocked value does not leak back."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Comprehend, Macie, and the guardrail each do one job",
+      "decision": "Which PII tool covers which surface — text the pipeline submits, data at rest, and the inference call — and why none replaces the others.",
+      "why": "Three tools, three surfaces. Comprehend detects PII entities in text your pipeline submits — a batch of notes, a document you are about to process. Macie scans what is already in an S3 bucket — data at rest you did not inspect on the way in. The guardrail is the inference-time check on the model's input and output. None replaces the others: Comprehend does not watch the bucket, Macie does not run inline, the guardrail does not scan storage. This is runnable: Comprehend detect_pii_entities returns the entities in submitted text. The losing choice is assuming one of them covers all three surfaces, leaving a gap — PII at rest, in flight, or at inference — uncovered.",
+      "snippets": [
+        {
+          "label": "Comprehend detects PII entities in text the pipeline submits. One of three surfaces.",
+          "language": "python",
+          "source": "import boto3\n\ncomprehend = boto3.client(\"comprehend\", region_name=\"eu-central-1\")\n\nout = comprehend.detect_pii_entities(\n    Text=\"Contact the patient at a.nordheim@example.com regarding SIN 123-456-789.\",\n    LanguageCode=\"en\",\n)\nfor e in out[\"Entities\"]:\n    print(e[\"Type\"], e[\"Score\"])"
+        },
+        {
+          "label": "From the terminal, check what Macie covers — list the classification jobs that scan data at rest, a different surface than Comprehend.",
+          "language": "shell",
+          "source": "aws macie2 list-classification-jobs"
+        }
+      ],
+      "infrastructure": "// Three PII surfaces, three tools: Comprehend detects entities in text the pipeline submits, Macie scans data already at rest in a bucket, and the guardrail is the inference-time check. None replaces the others — Comprehend does not watch storage, Macie does not run inline, the guardrail does not scan a bucket. A gap in any surface is uncovered PII.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the Comprehend PII detection from the snippets on the left, then\n# Run. The intercept returns the entities found in the submitted text.\n#\n# The goal: Comprehend covers text the pipeline submits — one of three PII\n# surfaces, alongside Macie (at rest) and the guardrail (at inference).\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The exam trap is treating these as interchangeable 'PII tools.' They cover\ndifferent surfaces: Comprehend is detection in text you submit (in flight,\nby your pipeline); Macie is discovery in S3 (at rest, often data you did\nnot inspect); the guardrail is the inline check on the model call. A design\nthat uses one and assumes it covers the others has an uncovered surface,\nwhich for health data is a finding, not a gap you discover later.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "comprehend",
+            "operation": "DetectPiiEntities",
+            "body": {
+              "Entities": [
+                { "Type": "EMAIL", "Score": 0.999, "BeginOffset": 22, "EndOffset": 46 },
+                { "Type": "CA_SOCIAL_INSURANCE_NUMBER", "Score": 0.997, "BeginOffset": 62, "EndOffset": 73 }
+              ]
+            }
+          },
+          {
+            "service": "macie2",
+            "operation": "ListClassificationJobs",
+            "body": {
+              "items": [ { "jobId": "macie-intake-bucket", "jobStatus": "RUNNING" } ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Mask before the prompt, not the output",
+      "decision": "Whether a value the model must never see is masked before the prompt, or filtered from the output after.",
+      "why": "When the requirement is 'the model must never see the raw value,' output filtering cannot meet it by definition — the model has already processed the value to produce the output you are filtering. Masking before the prompt replaces the raw value with a placeholder in the input, using Comprehend's detected offsets, so the model receives {SIN} and never the number. Output filtering is the right tool for 'do not show the value to the user'; masking-before-prompt is the tool for 'do not let the model see it.' This is runnable: masking the detected entities before the call sends a redacted prompt. The losing choice is output filtering for a never-see-it requirement, which is a filter applied after the model already saw the raw value.",
+      "snippets": [
+        {
+          "label": "Mask the detected entities in the input before the prompt, so the model receives placeholders, not raw values.",
+          "language": "python",
+          "source": "def mask(text, entities):\n    # entities from Comprehend, sorted by BeginOffset descending so\n    # offsets stay valid as we replace.\n    for e in sorted(entities, key=lambda x: x[\"BeginOffset\"], reverse=True):\n        text = text[: e[\"BeginOffset\"]] + \"{\" + e[\"Type\"] + \"}\" + text[e[\"EndOffset\"] :]\n    return text\n\nmasked_prompt = mask(raw_note, detected_entities)"
+        },
+        {
+          "label": "From the terminal, confirm Comprehend is reachable for the detection the mask depends on — list its endpoints or a quick no-op.",
+          "language": "shell",
+          "source": "aws comprehend list-pii-entities-detection-jobs"
+        }
+      ],
+      "infrastructure": "// Masking replaces the raw value with a typed placeholder in the input before the prompt, using Comprehend's offsets, so the model receives {SIN} and never the number. Output filtering cannot meet 'the model must never see the raw value' — by the time you filter the output, the model processed the raw value to produce it. Mask input for never-see; filter output for never-show.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the input masking from the snippets on the left, then Run. The\n# intercept confirms the detection the mask uses.\n#\n# The goal: raw values are masked to placeholders before the prompt, so the\n# model never receives the identifier — output filtering is too late.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "'Never see' and 'never show' are different requirements with different\ntools. Never-show: filter or anonymize the output — the model saw the\nvalue, the user does not. Never-see: mask the input before the prompt — the\nmodel receives a placeholder. This clinical requirement is never-see (even\na later filter would have the log and the model exposure), so masking\nbefore the prompt is the only mechanism that satisfies it. Comprehend finds\nthe spans; the mask replaces them before the call.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "comprehend",
+            "operation": "ListPiiEntitiesDetectionJobs",
+            "body": {
+              "PiiEntitiesDetectionJobPropertiesList": [ { "JobName": "intake-pii", "JobStatus": "COMPLETED" } ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Invocation logs hold the raw body, so encrypt",
+      "decision": "How the invocation logs are protected, given they contain the raw prompt and completion.",
+      "why": "Even with input masking and output filtering, the invocation log records the raw request and response body — 'we filtered the answer' is not 'the identifier is gone,' because the log is a separate surface that holds what the call carried. So the log group is encrypted with a customer-managed KMS key (not the default AWS-managed one, so key access is yours to scope), readers are a short least-privilege list, and retention is set rather than never-expire. Configuration: the lesson is the CMK-encrypted, least-privilege, retention-bounded log group. The losing choice is default encryption and open read access on logs that contain exactly the PII the rest of the pipeline works to suppress.",
+      "snippets": [
+        {
+          "label": "The invocation log group encrypted with a customer-managed key, readers scoped, retention set.",
+          "language": "typescript",
+          "source": "const logs = new LogGroup(this, 'IntakeInvocationLogs', {\n  encryptionKey: intakeCmk, // customer-managed, not the default\n  retention: RetentionDays.ONE_MONTH,\n});\nlogs.grantRead(auditorRole); // a short, named reader list — not open"
+        }
+      ],
+      "infrastructure": "// The invocation log holds the raw prompt and completion, so 'we filtered the answer' is not 'the identifier is gone' — the log is a separate surface. It is encrypted with a customer-managed KMS key (key access is yours to scope), readers are a short least-privilege list, and retention is bounded, not never-expire.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the encrypted log group from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the invocation logs are CMK-encrypted, read by a short named\n// list, and retention-bounded, because they hold the raw body.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The log is the surface people forget because the pipeline 'handled' the\nPII. But invocation logging records the request and response bodies, which\nare where the raw values lived before masking or after the model produced\nthem. A customer-managed key means you control who can decrypt, not just\nAWS; the short reader list and bounded retention limit exposure and\nlifetime. This is the same logging discipline as the policy assistant's\nlogging step, with the stakes raised to health data.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "encryptionKey: intakeCmk",
+            "present": true,
+            "message": "The log group is encrypted with a customer-managed key, so decryption access is yours to scope — not the default AWS-managed key."
+          },
+          {
+            "pattern": "retention: RetentionDays",
+            "present": true,
+            "message": "Retention is bounded, not never-expire, limiting how long the raw-body logs live."
+          },
+          {
+            "pattern": "grantRead(auditorRole)",
+            "present": true,
+            "message": "Readers are a short, named least-privilege list, because the logs hold exactly the PII the pipeline works to suppress."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Secrets Manager for the downstream token",
+      "decision": "Whether the downstream token lives in the system prompt or in Secrets Manager.",
+      "why": "The pipeline calls a downstream system that needs a token. Putting that token in the system prompt is a double mistake: the prompt is sent on every call and recorded in the invocation log, so the secret is now logged with every request — and the log already holds the raw body you are protecting. Secrets Manager holds the token, the handler fetches it at init, and it never enters the prompt or the log. Configuration: the lesson is the token in Secrets Manager, out of the prompt. The losing choice is a token in the system prompt, which logs a credential on every call in a pipeline whose whole point is not to leak sensitive values.",
+      "snippets": [
+        {
+          "label": "The downstream token in Secrets Manager, granted to the handler, never in the prompt.",
+          "language": "typescript",
+          "source": "const downstreamToken = new Secret(this, 'DownstreamToken');\ndownstreamToken.grantRead(handler);\nhandler.addEnvironment('TOKEN_SECRET_ARN', downstreamToken.secretArn);\n// Fetched at init. Never placed in the system prompt, where it would be\n// logged with every call."
+        }
+      ],
+      "infrastructure": "// The downstream token lives in Secrets Manager, fetched at init, never in the system prompt. A token in the prompt is sent and logged on every call — and this pipeline's invocation log already holds the raw body. Putting a credential there logs it with every request, in the one system built to not leak sensitive values.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the secret wiring from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the downstream token is in Secrets Manager and fetched at init,\n// never in the system prompt where it would be logged.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The system prompt feels like a convenient place for configuration, and a\ntoken is configuration, so it slips in. But the prompt is logged with every\ninvocation — especially here, where invocation logging is on — so a token\nin the prompt is a credential written to CloudWatch on every call. Secrets\nManager keeps it out of the prompt and the log. Same lesson as the contract\ndesk's credential step, sharpened by the logging in this pipeline.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "new Secret(this, 'DownstreamToken')",
+            "present": true,
+            "message": "The downstream token is held in Secrets Manager, fetched at init rather than carried in the prompt."
+          },
+          {
+            "pattern": "TOKEN_SECRET_ARN",
+            "present": true,
+            "message": "The environment holds the secret's ARN; the token is resolved at runtime, not placed in the system prompt."
+          },
+          {
+            "pattern": "systemPrompt +=",
+            "present": false,
+            "message": "The token is not concatenated into the system prompt. A prompt-embedded token is logged with every call — the leak this avoids."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "CloudTrail data events for InvokeModel",
+      "decision": "Whether InvokeModel calls are captured as CloudTrail data events, or management events are assumed to record them.",
+      "why": "The auditor asks which user invoked the model. CloudTrail management events record control-plane actions — creating a guardrail, changing a config — but they do not record every InvokeModel call. The model invocation is a data event, and data events are off by default and configured per resource. So the trail explicitly enables Bedrock data events, and now every call carries the identity that made it. Configuration: the lesson is the data-event selector for InvokeModel. The losing choice is relying on management events, which answer 'who changed the guardrail' but not 'who invoked the model on this patient,' leaving the auditor's actual question unanswerable.",
+      "snippets": [
+        {
+          "label": "A CloudTrail data-event selector for Bedrock model invocation, so every InvokeModel call records its caller.",
+          "language": "typescript",
+          "source": "const trail = new Trail(this, 'IntakeTrail', {});\ntrail.addEventSelector(DataResourceType.LAMBDA_FUNCTION, [], { includeManagementEvents: true });\n// Bedrock data events: advancedEventSelectors capturing eventCategory = Data\n// for AWS::Bedrock::* so each InvokeModel records the identity that called it."
+        }
+      ],
+      "infrastructure": "// Model invocation is a CloudTrail data event, off by default and configured per resource. Management events record control-plane changes (who edited the guardrail), not every InvokeModel call. The trail enables Bedrock data events so each call records its caller — which is exactly the auditor's 'which user invoked the model' question.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the CloudTrail data-event selector from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: InvokeModel calls are captured as data events, so the auditor\n// can tie a call to the user who made it.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The management-vs-data-event distinction is the whole step. Management\nevents are the default and cover API calls that change configuration. Data\nevents cover the high-volume data-plane operations — S3 object access,\nLambda invokes, Bedrock model invocations — and are opt-in per resource\nbecause they are voluminous. The auditor's 'who invoked the model' is a\ndata-event question; a trail of management events alone cannot answer it.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "addEventSelector",
+            "present": true,
+            "message": "A data-event selector is configured, so high-volume data-plane calls are captured, not only management events."
+          },
+          {
+            "pattern": "eventCategory = Data",
+            "present": true,
+            "message": "The selector captures data events for Bedrock, so each InvokeModel call records the identity that made it."
+          },
+          {
+            "pattern": "each InvokeModel records",
+            "present": true,
+            "message": "Every model invocation records its caller, which answers the auditor's 'which user invoked the model' — a data-event question."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Augmented AI gates the chart write",
+      "decision": "Whether the chart is written on model output, or only after a person accepts through an Augmented AI review.",
+      "why": "Until the clinician accepts, the chart does not change. Augmented AI (A2I) is the human-review gate: the generated note goes to a review task, the clinician accepts (or edits, or rejects), and only an accepted note is written to the chart. The write is downstream of the acceptance, not of the model. This is distinct from Ground Truth, which is a labeling path for building a training dataset — a different job entirely, and not a gate on this chart. Configuration: the lesson is A2I as the acceptance gate before the system of record. The losing choice is writing the chart on model output with review bolted on after, which means the chart changed before the person accepted.",
+      "snippets": [
+        {
+          "label": "An Augmented AI human-review flow gating the chart write. Only an accepted note is written.",
+          "language": "typescript",
+          "source": "const reviewFlow = new CfnFlowDefinition(this, 'AcceptNote', {\n  humanLoopConfig: { humanTaskUiArn: noteReviewUiArn, workteamArn: cliniciansArn, taskCount: 1 },\n  outputConfig: { s3OutputPath: 's3://intake/accepted/' },\n});\n// The chart write is triggered by acceptance in this flow, not by model output."
+        }
+      ],
+      "infrastructure": "// Augmented AI is the acceptance gate: the generated note goes to a human-review task, the clinician accepts, and only then is the note written to the chart. The write is downstream of acceptance, not model output. Ground Truth is a labeling path for training data — a different job, not a gate on this chart.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Augmented AI review flow from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the chart write is gated by a clinician's acceptance through\n// A2I, so nothing reaches the chart on model output alone.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "A2I (Augmented AI) and Ground Truth both involve humans, which is why they\nare confused. Ground Truth labels data to train a model — not relevant\nhere, this is not a training project. A2I inserts a human-review loop into\nan inference pipeline, which is exactly the accept-before-write gate the\nclinician requires. The chart being downstream of acceptance, not model\noutput, is the structural form of 'until they accept, the chart does not\nchange.'\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnFlowDefinition",
+            "present": true,
+            "message": "An Augmented AI flow definition inserts a human-review loop, so the chart write waits on a clinician's acceptance."
+          },
+          {
+            "pattern": "triggered by acceptance",
+            "present": true,
+            "message": "The chart write is downstream of acceptance, not model output — nothing reaches the chart until the clinician accepts."
+          },
+          {
+            "pattern": "CfnLabelingJob",
+            "present": false,
+            "message": "No Ground Truth labeling job. That is a training-data path, not the acceptance gate this chart needs."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A model card and a sliced eval",
+      "decision": "How the system's evaluation is documented and sliced, and when SageMaker Clarify applies.",
+      "why": "A clinical system needs its evaluation documented and sliced, not reduced to one aggregate score. A model card records the intended use, the data, the limits, and the eval results. The eval is sliced by the groups you are permitted to measure, because an aggregate accuracy can hide a subgroup where the system is worse. SageMaker Clarify is the bias/explainability tool when the comparison is a classic ML model with features and labels — it is not the right tool for a Bedrock chat evaluation, which is scored on generation quality and safety, not feature attributions. Configuration: the lesson is the model card plus sliced eval, and Clarify scoped to classic models. The losing choice is a single aggregate score with no slices and Clarify pointed at a chat model it does not fit.",
+      "snippets": [
+        {
+          "label": "A model card and a sliced eval; Clarify noted as the tool for a classic model, not this chat.",
+          "language": "typescript",
+          "source": "const evalConfig = {\n  modelCard: 'intended-use, data, limits, results',\n  slicedBy: ['age_band', 'language'], // groups you are permitted to measure\n  clarify: 'for a classic model with features and labels — not this Bedrock chat',\n};"
+        }
+      ],
+      "infrastructure": "// A model card documents intended use, data, limits, and results. The eval is sliced by permitted groups, because an aggregate score hides a subgroup where the system is worse. SageMaker Clarify is for a classic model with features and labels — a Bedrock chat is scored on generation quality and safety, not feature attributions, so Clarify is the wrong tool here.",
+      "workbench": {
+        "open": "eval.ts",
+        "files": [
+          {
+            "path": "eval.ts",
+            "body": "// Assemble the model card and sliced-eval config from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: a documented model card, an eval sliced by permitted groups,\n// and Clarify understood as a classic-model tool, not a chat one.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Two things to get right. Slicing: an aggregate accuracy can be fine overall\nand poor for one age band or language, which in a clinical system is a\nsafety and fairness problem a single number hides. The model card is where\nthe intended use and limits are stated so the system is not used outside\nthem. Clarify's scope: it explains and measures bias in classic ML models\nwith features and labels — it does not evaluate a Bedrock chat, which needs\ngeneration-quality and safety evals instead.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "modelCard",
+            "present": true,
+            "message": "A model card documents intended use, data, limits, and results — the system's evaluation is recorded, not implicit."
+          },
+          {
+            "pattern": "slicedBy",
+            "present": true,
+            "message": "The eval is sliced by permitted groups, so a subgroup where the system is worse is not hidden by an aggregate score."
+          },
+          {
+            "pattern": "not this Bedrock chat",
+            "present": true,
+            "message": "Clarify is scoped to a classic model with features and labels, not the Bedrock chat — which is scored on generation quality and safety."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Jailbreak and false-refusal sets, calibrated judge",
+      "decision": "What the safety eval in the pipeline measures, and whether a judge model can gate a deploy before it is calibrated.",
+      "why": "Two safety eval sets, not one. A jailbreak set checks the guardrail is not talked around — prompts that try to extract the identifier or bypass the filters. A false-refusal set checks the guardrail is not so aggressive it refuses legitimate clinical content — a note mentioning a condition is not an attack. Both run in the pipeline and gate the deploy. A judge model can score them, but only after it is calibrated against a human-labeled sample — an uncalibrated judge that over- or under-flags cannot be trusted to block a release. Configuration: the lesson is the two safety sets plus the calibrated judge. The losing choice is a jailbreak set alone (ships an over-refusing system) or an uncalibrated judge gating deploys on scores nobody validated.",
+      "snippets": [
+        {
+          "label": "Jailbreak and false-refusal sets in the pipeline, scored by a judge calibrated on a human sample first.",
+          "language": "typescript",
+          "source": "const safetyEval = {\n  sets: ['jailbreak', 'false_refusal'],\n  judge: { model: 'claude-sonnet', calibratedOn: 'human-labeled-sample' },\n  gatesDeploy: true,\n  // The judge gates only after it is calibrated against the human labels.\n};"
+        }
+      ],
+      "infrastructure": "// Two safety sets gate the deploy: a jailbreak set (the guardrail is not talked around) and a false-refusal set (the guardrail does not refuse legitimate clinical content). A judge model scores them only after calibration against a human-labeled sample — an uncalibrated judge that over- or under-flags cannot be trusted to block a release.",
+      "workbench": {
+        "open": "eval.ts",
+        "files": [
+          {
+            "path": "eval.ts",
+            "body": "// Assemble the safety eval config from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: jailbreak and false-refusal sets gate the deploy, scored by a\n// judge calibrated on human labels before it can block a release.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Safety eval has two failure directions, and measuring only one ships the\nother. Jailbreak: the system can be talked past its guardrail. False\nrefusal: the guardrail is so strict it refuses legitimate clinical content,\nwhich in this setting means refusing to help with a real note. Both gate\nthe pipeline. The judge-model caveat is the calibration: a judge is cheap\nand biased toward its own style, so it is calibrated on a human-labeled\nsample before it is trusted to block a deploy — the same discipline as the\npolicy assistant's eval judge.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "'jailbreak'",
+            "present": true,
+            "message": "A jailbreak set checks the guardrail cannot be talked around — the extract-the-identifier direction."
+          },
+          {
+            "pattern": "'false_refusal'",
+            "present": true,
+            "message": "A false-refusal set checks the guardrail does not refuse legitimate clinical content — the over-strict direction a jailbreak-only eval misses."
+          },
+          {
+            "pattern": "calibratedOn: 'human-labeled-sample'",
+            "present": true,
+            "message": "The judge model is calibrated on a human-labeled sample before it gates a deploy — an uncalibrated judge cannot be trusted to block a release."
+          }
+        ]
+      }
+    }
+  ]
+}

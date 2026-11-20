@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "id": "employee-answers",
+  "name": "Employee answers",
+  "summary": "Staff ask the wiki, SharePoint, and ticket history in their own words, and the answer must respect the permissions those sources already enforce.",
+  "brief": {
+    "whoIsAsking": "A staff member asking 'how do I get a laptop in the Munich office' or 'what is the on-call rotation,' in their own words, against systems that already decide who can open which page.",
+    "whatTheyNeedBack": "An answer drawn only from pages that this user can already open, never a page their SharePoint group cannot.",
+    "systemsAlreadyRunning": "A company wiki, SharePoint sites, and ticket history, each with its own access model. Internal IT has refused to own chunking, an embedding job, or a copied permissions model.",
+    "breaksWhen": "A staff member is shown a page their SharePoint group cannot open. The permissions are the product, and one leak proves the sources' access model was never actually in force.",
+    "doneMeans": "A staff question returns a page that user can already open, a user without that permission gets nothing from it, and a code question typed in the IDE never lands in this index."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "staff", "label": "Staff member", "flowsTo": ["q"] },
+          { "id": "idc", "label": "IAM Identity Center", "icon": "iam", "group": "acct", "flowsTo": ["q"] },
+          { "id": "q", "label": "Amazon Q Business", "icon": "bedrock", "group": "acct", "flowsTo": ["wiki", "sharepoint", "tickets"] },
+          { "id": "wiki", "label": "Wiki connector", "group": "acct" },
+          { "id": "sharepoint", "label": "SharePoint connector", "group": "acct" },
+          { "id": "tickets", "label": "Ticket history connector", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Q Business carries the source's own permissions",
+      "decision": "Whether the answer is filtered by permissions you copied into metadata, or by the access model the connected sources already enforce.",
+      "why": "The wiki, SharePoint, and the ticket system already decide who can open which page. Amazon Q Business connects to those sources and answers as the signed-in user, applying the permissions the source enforces — the chat_sync call is made with the user's identity, and a page the user's group cannot open does not appear in their answer. The losing choice is to build your own index and copy the ACLs into document metadata: now there are two permission models, and the copy is the one that drifts. A page shown to someone whose group cannot open it is the Breaks when, and a copied ACL is how it happens. This step is runnable: the user-scoped chat returns only permitted pages.",
+      "snippets": [
+        {
+          "label": "The Q Business runtime client and the signed-in user. The answer is scoped to who is asking.",
+          "language": "python",
+          "source": "import boto3\n\nq = boto3.client(\"qbusiness\", region_name=\"eu-central-1\")\n\nAPP_ID = \"app-employee-answers\"\nUSER_ID = \"munich-engineer@corp.example\"  # the signed-in staff member"
+        },
+        {
+          "label": "chat_sync as that user. Q Business applies the source permissions, so only pages this user can open come back.",
+          "language": "python",
+          "source": "out = q.chat_sync(\n    applicationId=APP_ID,\n    userId=USER_ID,\n    userMessage=\"How do I get a laptop in the Munich office?\",\n)\n\nprint(out[\"systemMessage\"])\nfor ref in out.get(\"sourceAttributions\", []):\n    print(ref[\"title\"], ref[\"url\"])"
+        },
+        {
+          "label": "From the terminal, confirm the application is wired to Identity Center before trusting the user scoping — get-application shows its identity type. User-level permissions only hold when the app resolves a real user.",
+          "language": "shell",
+          "source": "aws qbusiness get-application --application-id app-employee-answers"
+        }
+      ],
+      "infrastructure": "// Q Business connects to the sources and answers as the signed-in user via\n// IAM Identity Center. The source enforces its own ACL; Q Business does not\n// re-implement it. chat_sync carries userId, so a page the user's group\n// cannot open never enters the answer. No second permission model to drift.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the user-scoped chat from the snippets on the left, then Run.\n# The intercept returns an answer sourced only from pages this user can\n# open.\n#\n# The goal: the answer respects the source's own permissions, because the\n# call is made as the user, not as a service that sees everything.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "chat_sync is the synchronous Q Business turn; there is a streaming variant\n(chat) for the token-by-token UI. The permission enforcement is the whole\npoint here: Q Business federates through IAM Identity Center and asks each\nconnected source what THIS user may see. Copying ACLs into your own index\nis the design this project turns down, because two permission models means\nthe copy eventually disagrees with the source — and the disagreement is a\nleak, which is the Breaks when.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "qbusiness",
+            "operation": "ChatSync",
+            "body": {
+              "systemMessage": "To get a laptop in the Munich office, open an IT asset request in the Munich IT portal and collect it from the 3rd-floor service desk. Source: Munich IT Onboarding.",
+              "sourceAttributions": [
+                {
+                  "title": "Munich IT Onboarding",
+                  "url": "https://wiki.corp.example/munich/it-onboarding"
+                }
+              ]
+            }
+          },
+          {
+            "service": "qbusiness",
+            "operation": "GetApplication",
+            "body": {
+              "applicationId": "app-employee-answers",
+              "displayName": "employee-answers",
+              "identityType": "AWS_IAM_IDC",
+              "status": "ACTIVE"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The knowledge base this system does not build",
+      "decision": "Whether to build a Bedrock knowledge base over copies of these sources, or let Q Business read them in place.",
+      "why": "A Bedrock knowledge base would mean owning the chunking, running the embedding job, and — the part that bites — copying each source's permissions into document metadata so the filter can enforce them. IT refused exactly that work, and they were right to: the permissions copy is a second source of truth that drifts from the first, and a drifted ACL is a leak. This step is the one where you practice saying no to the knowledge base, not building one. Configuration: the lesson is the absence — no CfnKnowledgeBase, no copied ACL field — and why that absence is the design.",
+      "snippets": [
+        {
+          "label": "The design: a Q Business application over connectors, with Identity Center as the user resolver. No index you own, no ACL you copy.",
+          "language": "typescript",
+          "source": "const app = new CfnApplication(this, 'EmployeeAnswers', {\n  displayName: 'employee-answers',\n  identityCenterInstanceArn: idcInstanceArn,\n});"
+        }
+      ],
+      "infrastructure": "// The design is the absence of a knowledge base. Building one would mean an\n// index IT must own and a permissions copy that drifts from the source.\n// Q Business reads the wiki, SharePoint, and tickets in place and answers\n// as the user, so the source's ACL is the only ACL.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Q Business application from the snippets on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: a Q Business app over connectors, and NO knowledge base — the\n// absence is the decision, because a copied ACL is the leak.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This is the step where the losing choice is the one you would reach for out\nof habit. A Bedrock knowledge base is the right tool when you own the\ncorpus and the permission model — the policy-assistant scenario is exactly\nthat. Here the sources own both, and re-implementing them is pure risk. The\nskill the step rehearses is declining the familiar architecture and naming\nwhy: two permission models is one too many.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnApplication",
+            "present": true,
+            "message": "A Q Business application over the connectors is the design. It reads the sources in place and answers as the user."
+          },
+          {
+            "pattern": "identityCenterInstanceArn",
+            "present": true,
+            "message": "Identity Center resolves the signed-in user, which is what lets Q Business apply each source's own permissions per request."
+          },
+          {
+            "pattern": "new CfnKnowledgeBase",
+            "present": false,
+            "message": "No knowledge base is built. Building one forces an owned index and a copied ACL that drifts from the source — the leak this design avoids."
+          },
+          {
+            "pattern": "allowedGroups",
+            "present": false,
+            "message": "No permissions copied into document metadata. The source's access model is the only one; a second copy is the thing that drifts and leaks."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Kendra is an index, not a second Q Business",
+      "decision": "When a team wants a managed search index but still not a knowledge-base pipeline, whether Kendra or a second Q Business is the answer.",
+      "why": "Kendra is the managed search product: an index with connectors and relevance tuning, for a team that wants search results and will handle the generation themselves. It is not a second Q Business — it does not run the chat, the identity federation, or the end-to-end answer. Reaching for Kendra here, where the requirement is a user-scoped conversational answer, would mean rebuilding the chat and the permission federation on top of it. Configuration: the lesson is what Kendra is for (a managed index when you still refuse the knowledge-base pipeline) and what it is not (the conversational, permission-aware assistant Q Business already is).",
+      "snippets": [
+        {
+          "label": "Kendra's shape: a managed search index with connectors. Useful when you want results and own the generation — not a replacement for the Q Business chat.",
+          "language": "typescript",
+          "source": "const index = new CfnIndex(this, 'SearchIndex', {\n  name: 'employee-search',\n  edition: 'ENTERPRISE_EDITION',\n  roleArn: kendraRole.roleArn,\n});\n// A search index. You still build the chat and the user scoping on top."
+        }
+      ],
+      "infrastructure": "// Kendra is the managed search index for a team that wants an index and\n// still not a knowledge-base pipeline. It returns ranked results; it does\n// not run the conversation or the identity federation. For a user-scoped\n// conversational answer, that is work Q Business already does, so Kendra is\n// the wrong reach here even though it is a real product.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the Kendra index from the snippet on the left, as the thing you\n// would choose ONLY if the requirement were a search index you generate\n// on top of. Configuration step: nothing to Run.\n//\n// The goal: name what Kendra is for and what it is not — it is an index,\n// not the conversational, permission-aware assistant.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Three products, three jobs. Q Business: the end-to-end, identity-aware\nconversational assistant over connected sources — this scenario. Kendra: a\nmanaged search index for a team that wants results and owns the rest. A\nBedrock knowledge base: an index you own over a corpus you own. Picking\nKendra here means rebuilding the chat and the permission federation Q\nBusiness gives you for free, so it is the wrong tool for this requirement\neven though it is the right tool for a different one.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnIndex",
+            "present": true,
+            "message": "Kendra is a managed search index — the right choice when a team wants ranked results and will build the generation themselves."
+          },
+          {
+            "pattern": "ENTERPRISE_EDITION",
+            "present": true,
+            "message": "The index edition is a Kendra concern. Kendra returns results; it does not run the conversation or the identity federation Q Business provides."
+          },
+          {
+            "pattern": "chat_sync",
+            "present": false,
+            "message": "No chat on the Kendra index. Reaching for Kendra here would mean rebuilding the conversational, user-scoped answer Q Business already is — the wrong tool for this requirement."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Q Developer stays in the IDE",
+      "decision": "Where a code question goes, and whether it should ever reach this staff-answers index.",
+      "why": "A question about the on-call rotation and a question about a failing unit test are different products. Amazon Q Developer answers code questions in the IDE, with the repository and the developer's context; it is not the browser application staff open to ask about laptops in Munich. Letting a code question land in this index is indexing the wrong thing — and letting a wiki question go to Q Developer is asking the IDE about HR policy. The console step exists so you index the right source into the right product. This is a diagnosis step: the lesson is the routing rule, not a call to run.",
+      "snippets": [
+        {
+          "label": "The routing rule, as the line you hold. Two products, two question types, no crossover.",
+          "language": "python",
+          "source": "# Where a question goes:\n# - 'how do I get a laptop in Munich' -> Q Business (wiki/SharePoint/tickets)\n# - 'why is this unit test failing'   -> Q Developer, in the IDE, on the repo\n#\n# A code question must never land in the staff-answers index, and a wiki\n# question must never be routed to the IDE assistant. Different sources,\n# different products, different permission models.\nROUTE = {\"staff\": \"q-business\", \"code\": \"q-developer-ide\"}"
+        }
+      ],
+      "infrastructure": "// Nothing to provision. Q Developer lives in the IDE on the repository; Q\n// Business lives in the browser over the staff sources. The decision is a\n// routing one: index the wiki into Q Business, leave code to Q Developer,\n// and never cross them.",
+      "workbench": {
+        "open": "routing.py",
+        "files": [
+          {
+            "path": "routing.py",
+            "body": "# Assemble the routing rule from the snippet on the left. Configuration\n# step: nothing to Run.\n#\n# The goal: a code question goes to Q Developer in the IDE and never lands\n# in this staff-answers index; a wiki question goes to Q Business.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The trap is treating 'Amazon Q' as one product. It is a family: Q Business\n(connected enterprise sources, browser, identity-aware), Q Developer (code,\nIDE, repository context). They do not share an index and should not. The\nDone means spells it out: a code question typed in the IDE never lands in\nthis index. Routing is the control; a single mega-index over code and wiki\nis how a permission boundary quietly disappears.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "q-developer-ide",
+            "present": true,
+            "message": "A code question routes to Q Developer in the IDE, on the repository — not into the staff-answers index."
+          },
+          {
+            "pattern": "q-business",
+            "present": true,
+            "message": "A staff question routes to Q Business over the connected sources, where the identity-aware permission model holds."
+          },
+          {
+            "pattern": "mega_index",
+            "present": false,
+            "message": "No single index over both code and wiki. One mega-index is how a permission boundary quietly disappears — the two products stay separate."
+          }
+        ]
+      }
+    }
+  ]
+}

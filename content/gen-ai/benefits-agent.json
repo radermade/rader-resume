@@ -1,0 +1,478 @@
+{
+  "schemaVersion": 1,
+  "id": "benefits-agent",
+  "name": "Benefits agent",
+  "summary": "A live classic Bedrock Agent getting a new question a month before open enrollment, changed without ever pointing production at a draft.",
+  "brief": {
+    "whoIsAsking": "An employee asking the year-old benefits assistant about coverage, dependents, and what changed at open enrollment — now including a new dependent-coverage question being added this month.",
+    "whatTheyNeedBack": "An accurate coverage answer from the production assistant, a premium that is calculated rather than guessed, and an address change that reaches the HR system of record.",
+    "systemsAlreadyRunning": "A classic Bedrock Agent, live for a year: action groups, an alias, a knowledge base of plan documents, a guardrail. The plan system already has an API. This is not a new build.",
+    "breaksWhen": "Production serves a draft. Enrollment runs for three weeks, so a wrong coverage answer compounds across every employee who read it before anyone noticed.",
+    "doneMeans": "The production alias serves the new dependent question, the draft alias is where you tried it, the premium comes from the code interpreter, and an address change waits for the HR system."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "employee", "label": "Employee", "flowsTo": ["agent"] },
+          { "id": "agent", "label": "Bedrock Agent (alias)", "icon": "bedrock", "group": "acct", "flowsTo": ["action", "kb", "guardrail"] },
+          { "id": "action", "label": "Action group (Lambda)", "icon": "lambda", "group": "acct", "flowsTo": ["planapi"] },
+          { "id": "planapi", "label": "Plan system API", "group": "acct" },
+          { "id": "kb", "label": "Knowledge base (plan docs)", "icon": "bedrock", "group": "acct" },
+          { "id": "guardrail", "label": "Guardrail (version)", "group": "acct" },
+          { "id": "hr", "label": "HR system of record", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Classic agents, because this one already is",
+      "decision": "Whether to keep this on the classic Bedrock Agents stack it already runs on, or rebuild it on AgentCore the month before enrollment.",
+      "why": "This assistant has been live for a year as a classic Bedrock Agent, and open enrollment is next month. Rebuilding it on AgentCore now is a different project with its own risk, undertaken at the worst possible time. The job is to change the live classic agent, not replace the runtime under it. This is the mirror of the member-services decision: there, a new agent started on AgentCore; here, an existing agent stays classic because replacing a working system weeks before its busiest period is how you break it. Configuration: the lesson is keeping the existing stack and recognizing that 'already live' is the deciding fact.",
+      "snippets": [
+        {
+          "label": "The existing classic agent, kept. Action groups, a knowledge base, a guardrail — the stack that has run for a year.",
+          "language": "typescript",
+          "source": "const agent = new CfnAgent(this, 'BenefitsAgent', {\n  agentName: 'benefits-desk',\n  foundationModel: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0',\n  instruction: benefitsInstruction,\n});"
+        }
+      ],
+      "infrastructure": "// This is a year-old classic Bedrock Agent, so it stays classic. Rebuilding on AgentCore the month before open enrollment is a separate project with separate risk at the worst time. 'Already live' is the deciding fact, the mirror of the member-services 'new agent' decision.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the classic agent definition from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: keep the existing classic Bedrock Agent, because it is already\n// live and enrollment is next month — not a time to swap runtimes.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The classic-vs-AgentCore decision is the same question as member-services,\nopposite answer. New build, no legacy: AgentCore. Year-old live agent a\nmonth before its peak: keep it classic. The skill is resisting the urge to\nmodernize at the worst moment — the migration is a real project, and\nenrollment week is not when you take its risk.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "CfnAgent",
+            "present": true,
+            "message": "The existing classic Bedrock Agent is kept. It has run for a year; enrollment month is not the time to replace the runtime."
+          },
+          {
+            "pattern": "benefits-desk",
+            "present": true,
+            "message": "The agent is the one already named and live, changed in place rather than rebuilt."
+          },
+          {
+            "pattern": "CfnRuntime",
+            "present": false,
+            "message": "No AgentCore runtime. That is the path for a new build; this agent already exists, so rebuilding it now is risk taken at the wrong time."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "An OpenAPI action group, Lambda fulfillment",
+      "decision": "Whether the agent browses the plan system or calls it through a typed action group backed by a Lambda.",
+      "why": "The plan system already has an API. The agent reaches it through an action group: an OpenAPI schema declares the operations, and a Lambda fulfills them by calling the real API. The agent does not browse a web page or scrape a portal — it calls a typed operation with validated parameters. Adding the dependent-coverage question means adding an operation to that schema and the Lambda, which is the change this scenario is about. Configuration: the lesson is the action group as the agent's typed call into the existing API. The losing choice is a browsing agent, which is slower, unreliable, and unauditable against a system that already exposes an API.",
+      "snippets": [
+        {
+          "label": "The action group: an OpenAPI schema plus a Lambda that calls the real plan API. The new dependent operation is added here.",
+          "language": "typescript",
+          "source": "const actionGroup = new CfnAgent.AgentActionGroupProperty({\n  actionGroupName: 'coverage',\n  actionGroupExecutor: { lambda: fulfillmentFn.functionArn },\n  apiSchema: { s3: { s3BucketName: schemaBucket, s3ObjectKey: 'coverage-openapi.json' } },\n});"
+        }
+      ],
+      "infrastructure": "// The agent calls the plan system through an action group: an OpenAPI schema declares the operations, a Lambda fulfills them against the real API. The agent does not browse. Adding the dependent-coverage question is a new operation in that schema and the Lambda — a typed, validated call, not a scrape.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the action group from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the agent calls the plan API through a typed OpenAPI action\n// group with Lambda fulfillment, not by browsing.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "An action group is how a classic agent calls out: OpenAPI describes the\noperations, a Lambda runs them. It is the classic-agent equivalent of the\nmember-services gateway, and the same principle holds — the backend API\nalready exists, so the agent adapts to it rather than reimplementing it.\nThe dependent-coverage change touches two things, the schema and the\nLambda, which is exactly why the next step (prepare) matters.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "actionGroupExecutor",
+            "present": true,
+            "message": "A Lambda fulfills the action group, calling the real plan API — the agent calls a typed operation rather than browsing."
+          },
+          {
+            "pattern": "apiSchema",
+            "present": true,
+            "message": "An OpenAPI schema declares the operations, so the agent's calls are typed and validated against the plan system's contract."
+          },
+          {
+            "pattern": "coverage",
+            "present": true,
+            "message": "The coverage action group is where the new dependent-coverage operation is added — a schema and Lambda change, the subject of this build."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "PrepareAgent, then move the alias",
+      "decision": "What makes an instruction or schema edit actually take effect, and in what order the alias moves.",
+      "why": "Saving an instruction or schema change does not make the running agent use it. PrepareAgent compiles the saved changes into the DRAFT version; until you prepare, the agent runs the last prepared state and your edit is invisible. The order is: edit, PrepareAgent, test on the draft alias, then move the production alias to the newly prepared version. The running alias never sees an edit that was only saved. This is runnable: PrepareAgent returns a preparedAt and a PREPARED status. The losing move is editing and expecting the change live immediately — the source of the step-9 'my edit does nothing' failure.",
+      "snippets": [
+        {
+          "label": "The agent control-plane client, for the prepare call that compiles saved edits into DRAFT.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent\", region_name=\"eu-central-1\")\n\nAGENT_ID = \"BENEFITSAG01\""
+        },
+        {
+          "label": "PrepareAgent compiles the saved instruction and schema into DRAFT. Only after this does the agent run the new behavior.",
+          "language": "python",
+          "source": "out = agent.prepare_agent(agentId=AGENT_ID)\nprint(out[\"agentStatus\"], out[\"preparedAt\"])\n# Then: publish an agent version, point the prod alias at it."
+        },
+        {
+          "label": "From the terminal, confirm the prepared status with get-agent before moving the alias — a PREPARING status means the compile is not done.",
+          "language": "shell",
+          "source": "aws bedrock-agent get-agent --agent-id BENEFITSAG01"
+        }
+      ],
+      "infrastructure": "// PrepareAgent compiles saved edits into DRAFT; the running agent ignores an unprepared edit. The order is edit, prepare, test the draft alias, then move the prod alias to the new version. Skipping prepare is why an edit 'does nothing' — the agent is still running the last prepared state.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the prepare call from the snippets on the left, then Run. The\n# intercept returns a PREPARED status and a preparedAt time.\n#\n# The goal: see that PrepareAgent is the step that makes a saved edit real,\n# before the alias moves to the new version.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "PrepareAgent is the compile step people forget. The lifecycle: edit (saved\nto DRAFT), PrepareAgent (compiled), test on the draft alias, create a\nnumbered version, move the prod alias. Each is separate. The step-9\ndiagnosis is the skipped-prepare case: the edit is saved, the agent runs\nthe old prepared state, and it looks like the instruction change had no\neffect. Prepare, then ask again, before touching the prompt.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent",
+            "operation": "PrepareAgent",
+            "body": {
+              "agentId": "BENEFITSAG01",
+              "agentStatus": "PREPARED",
+              "agentVersion": "DRAFT",
+              "preparedAt": "2026-11-02T10:05:00Z"
+            }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "GetAgent",
+            "body": {
+              "agent": {
+                "agentId": "BENEFITSAG01",
+                "agentName": "benefits-desk",
+                "agentStatus": "PREPARED"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "DRAFT is not the production alias",
+      "decision": "Which alias employees hit, and which one testers use, during an enrollment-period change.",
+      "why": "DRAFT is the mutable working version — every save changes it. Testers point at the draft alias to try the new dependent question. Employees must hit a stable production alias that points at a numbered, prepared version, and that alias only moves after the draft is verified. If production points at DRAFT, every mid-edit save is live to employees, and a half-finished instruction change is serving enrollment traffic — the Breaks when exactly. Configuration: the lesson is the prod alias pinned to a numbered version, with DRAFT reserved for testing. The losing choice is a production alias on DRAFT, which makes every work-in-progress edit a production deploy.",
+      "snippets": [
+        {
+          "label": "The production alias points at a numbered version, never DRAFT. The draft alias is for testers.",
+          "language": "typescript",
+          "source": "const prodAlias = new CfnAgentAlias(this, 'ProdAlias', {\n  agentId: agent.attrAgentId,\n  agentAliasName: 'prod',\n  routingConfiguration: [{ agentVersion: '4' }],\n});\n// Testers use the built-in draft alias (TSTALIASID / DRAFT). Employees use 'prod'."
+        }
+      ],
+      "infrastructure": "// The prod alias points at a numbered, prepared version; the draft alias is for testers. If prod pointed at DRAFT, every mid-edit save would be live to employees, and a half-finished change would serve enrollment traffic. The alias moves to a new version only after the draft is verified.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the production alias from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: prod points at a numbered version and testers use the draft, so\n// a mid-edit save never reaches employees.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "DRAFT is a moving target by design — it is whatever was last saved. That\nis perfect for a tester and catastrophic for production during enrollment,\nwhen a wrong coverage answer compounds across three weeks. The numbered\nversion is immutable once created, so the prod alias pointing at version 4\nserves exactly version 4 until you deliberately move it. This is the\nalias-based-deploy rule from the serverless standards, applied to an agent.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "agentAliasName: 'prod'",
+            "present": true,
+            "message": "A named production alias is what employees hit, distinct from the draft alias testers use."
+          },
+          {
+            "pattern": "agentVersion: '4'",
+            "present": true,
+            "message": "The prod alias points at a numbered, immutable version, so employees get exactly that version until the alias is deliberately moved."
+          },
+          {
+            "pattern": "agentVersion: 'DRAFT'",
+            "present": false,
+            "message": "Production does not point at DRAFT. DRAFT changes on every save; a prod alias on it would serve every mid-edit change to employees during enrollment."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A numbered guardrail version on the agent",
+      "decision": "Whether the agent references the guardrail by a numbered version or by the moving 'latest'.",
+      "why": "The agent's guardrail must be pinned to a numbered version, for the same reason the prod alias is: 'latest' moves, and a version you can roll back to is one you named. A guardrail edited mid-enrollment under a 'latest' reference changes the agent's safety behavior with no deploy and no way back. Pinning version 3 means the agent's guardrail is exactly version 3 until you move it, and rolling back is pointing at the previous number. Configuration: the lesson is the numbered guardrail version on the agent. The losing choice is DRAFT or 'latest', which couples the agent's safety to whatever the guardrail happens to be right now.",
+      "snippets": [
+        {
+          "label": "The agent references a numbered guardrail version. Not DRAFT, not an implicit latest.",
+          "language": "typescript",
+          "source": "const guardrailConfig = {\n  guardrailIdentifier: benefitsGuardrailId,\n  guardrailVersion: '3',\n};\n// A numbered version is a point you can roll back to. 'latest' is not."
+        }
+      ],
+      "infrastructure": "// The agent pins a numbered guardrail version, like the prod alias pins a numbered agent version. 'latest' moves under you; a numbered version is a rollback point. A guardrail edited mid-enrollment under 'latest' would change safety behavior with no deploy and no way back.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the guardrail config from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the agent references a numbered guardrail version, so safety\n// behavior is pinned and rollback is pointing at the previous number.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Same versioning discipline as the policy assistant's guardrail step and\nthis scenario's prod alias: numbered versions are the unit of rollback.\nThe three things that must all be pinned to numbers here — the agent\nversion the prod alias points at, the guardrail version, and (implicitly)\nthe prepared state — are the difference between 'roll back the alias' and\n'figure out what the guardrail was last Tuesday.'\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "guardrailVersion: '3'",
+            "present": true,
+            "message": "The agent references a numbered guardrail version, a point it can roll back to."
+          },
+          {
+            "pattern": "guardrailIdentifier",
+            "present": true,
+            "message": "The guardrail is identified explicitly on the agent, so its safety policy is a declared, versioned dependency."
+          },
+          {
+            "pattern": "guardrailVersion: 'DRAFT'",
+            "present": false,
+            "message": "The guardrail version is not DRAFT. DRAFT moves on every edit; the agent's safety behavior would change with no deploy and no rollback point."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Session memory, not a replayed transcript",
+      "decision": "Whether each turn replays the whole conversation, or the agent keeps session memory of what the employee already said.",
+      "why": "The employee already told the agent which plan they are on. Replaying the full transcript every turn re-sends all of it to the model — growing token cost, growing latency, and eventually a context window that drops the earliest turns (where the plan was stated). Agent session memory keeps the relevant state across turns without resending the raw transcript, so 'which plan am I on' is remembered rather than re-derived. Configuration: the lesson is session memory over transcript replay. The losing choice is replaying everything, which is the lost-in-the-middle and token-bill failure the support-chat scenario also hits.",
+      "snippets": [
+        {
+          "label": "Session memory on the agent, so prior turns are summarized state, not a full replay.",
+          "language": "typescript",
+          "source": "const memoryConfig = {\n  enabledMemoryTypes: ['SESSION_SUMMARY'],\n  storageDays: 30,\n};\n// The plan the employee stated is remembered, not re-sent every turn."
+        }
+      ],
+      "infrastructure": "// Agent session memory keeps prior state (the plan the employee is on) as summarized memory, not a replayed transcript. Replaying everything grows tokens and latency each turn and eventually drops the earliest turns from the context — the plan statement among them. Memory remembers it instead.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the memory config from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: session memory keeps what the employee already said, so the\n// agent does not replay the whole transcript every turn.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Session memory is the agent-native answer to the same problem the support\nchat scenario solves with DynamoDB session summaries: a long conversation\nmust not be replayed verbatim. For a benefits turn, the plan the employee\nstated three messages ago is the state that matters; memory keeps it so a\ndependent-coverage follow-up does not require re-stating the plan.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "SESSION_SUMMARY",
+            "present": true,
+            "message": "Session memory summarizes prior turns, so the plan the employee stated is remembered rather than replayed."
+          },
+          {
+            "pattern": "enabledMemoryTypes",
+            "present": true,
+            "message": "Memory is explicitly enabled on the agent, keeping relevant state across turns without resending the raw transcript."
+          },
+          {
+            "pattern": "storageDays",
+            "present": true,
+            "message": "Memory retention is set, so session state persists across the employee's turns within the enrollment window."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The code interpreter computes the premium",
+      "decision": "Whether the model computes a premium in its head, or the code interpreter calculates it.",
+      "why": "A premium is arithmetic — rates, dependents, proration — and a language model doing arithmetic in its head is a model guessing a benefits number. The code interpreter runs real Python the model writes, so the calculation is executed, not predicted, and the number is reproducible and auditable. The model decides what to compute; the interpreter computes it. This is runnable: invoking the agent with the code interpreter enabled returns a computed premium. The losing choice is letting the model state a premium directly, which is a plausible-looking number with no calculation behind it — wrong often enough to matter, and confidently so.",
+      "snippets": [
+        {
+          "label": "The agent-runtime client, invoking the agent with the code interpreter available for the premium math.",
+          "language": "python",
+          "source": "import boto3\n\nruntime = boto3.client(\"bedrock-agent-runtime\", region_name=\"eu-central-1\")\n\nAGENT_ID = \"BENEFITSAG01\"\nALIAS_ID = \"PRODALIAS01\""
+        },
+        {
+          "label": "Invoke the agent for a premium question. The code interpreter runs the arithmetic; the model does not do it in its head.",
+          "language": "python",
+          "source": "out = runtime.invoke_agent(\n    agentId=AGENT_ID,\n    agentAliasId=ALIAS_ID,\n    sessionId=\"sess-emp-77\",\n    inputText=\"What is my monthly premium with two dependents on plan Gold?\",\n    enableTrace=False,\n)\nfor event in out[\"completion\"]:\n    if \"chunk\" in event:\n        print(event[\"chunk\"][\"bytes\"].decode())"
+        },
+        {
+          "label": "From the terminal, confirm the alias is the production one before invoking it — get-agent-alias shows which version it routes to.",
+          "language": "shell",
+          "source": "aws bedrock-agent get-agent-alias --agent-id BENEFITSAG01 --agent-alias-id PRODALIAS01"
+        }
+      ],
+      "infrastructure": "// The code interpreter runs the premium arithmetic as real Python the model writes, so the number is executed and auditable, not predicted. The model decides what to compute; the interpreter computes it. A model stating a premium directly is a confident guess at a benefits figure.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the agent invocation from the snippets on the left, then Run. The\n# intercept streams back a computed premium.\n#\n# The goal: the premium comes from the code interpreter running arithmetic,\n# not from the model guessing a number.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The code interpreter is the answer to 'the model must not do math in its\nhead.' It writes and runs Python in a sandbox, so a premium is a computed\nresult with a visible calculation, not a token-predicted figure. The\ninvoke_agent completion is a stream of events; the chunk events carry the\nanswer text. enableTrace is False here for the same reason as the\nmember-services trace step: the trace holds the employee's details.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent-runtime",
+            "operation": "InvokeAgent",
+            "body": {
+              "completion": "stream:computed-premium",
+              "contentType": "application/json",
+              "sessionId": "sess-emp-77"
+            }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "GetAgentAlias",
+            "body": {
+              "agentAlias": {
+                "agentId": "BENEFITSAG01",
+                "agentAliasId": "PRODALIAS01",
+                "agentAliasName": "prod",
+                "routingConfiguration": [ { "agentVersion": "4" } ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Return of control for the address change",
+      "decision": "Whether the agent writes an address change into HR, or returns control so the HR system of record does it.",
+      "why": "An address change is a write to the HR system of record, and the agent is not the system of record. The agent returns control: it surfaces the proposed change and hands it to the HR process, which performs the write. The agent proposes; HR disposes. Letting the agent write directly would make a chat assistant an author of record for employee data, with no review and the agent's fallibility in the write path. Configuration: the lesson is return-of-control for the write. The losing choice is an action group that writes the address directly, which puts a model's output into the HR system without the system of record's own process.",
+      "snippets": [
+        {
+          "label": "The address-change action returns control to the HR process instead of writing. The agent does not author the record.",
+          "language": "typescript",
+          "source": "const addressChange = {\n  name: 'change_address',\n  // returnControl: the proposed change goes to the HR system of record,\n  // which performs the write. The agent does NOT write HR data.\n  returnControl: true,\n};"
+        }
+      ],
+      "infrastructure": "// The address change returns control to the HR system of record, which performs the write. The agent surfaces the proposed change and stops. It is not the author of record for employee data, so a model's output never lands directly in HR without the system's own process.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the return-of-control address action from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: an address change is proposed by the agent and written by the\n// HR system of record, not authored by the agent.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Return of control appears here and in member-services for the same reason:\na write with real-world consequence (money there, a record of truth here)\nmust not be the model's to complete. The HR system of record owns employee\naddresses; the agent proposing a change and HR writing it keeps the system\nof record authoritative. A direct-write action group would make the chat\nagent an author of HR data, which it must not be.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "returnControl: true",
+            "present": true,
+            "message": "The address change returns control to the HR process; the agent proposes and HR writes."
+          },
+          {
+            "pattern": "change_address",
+            "present": true,
+            "message": "The address-change action is explicitly a return-of-control operation, not a direct write into HR."
+          },
+          {
+            "pattern": "hrApi.write",
+            "present": false,
+            "message": "No direct HR write on the action. The HR system of record performs the write; the agent is not the author of record for employee data."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The edit that did nothing was a skipped prepare",
+      "decision": "What to check first when an instruction edit appears to have no effect in the test alias.",
+      "why": "You change the instruction, save, ask the draft alias, and it behaves exactly as before. The instinct is to rewrite the instruction — maybe the wording was wrong. Almost always the real cause is a skipped PrepareAgent: the edit is saved to DRAFT but not compiled, so the agent is still running the last prepared state. The fix is to prepare, then ask again, before touching the prompt. This is runnable: calling PrepareAgent returns the prepared status that makes the saved edit live. The losing move is iterating on the instruction wording against an agent that never recompiled — chasing a prompt bug that is actually a missing build step.",
+      "snippets": [
+        {
+          "label": "The symptom and the first check: an edit that does nothing is usually an unprepared edit.",
+          "language": "python",
+          "source": "import boto3\n\nagent = boto3.client(\"bedrock-agent\", region_name=\"eu-central-1\")\nAGENT_ID = \"BENEFITSAG01\"\n\n# Symptom: edited the instruction, saved, asked the draft alias, no change.\n# First check: was PrepareAgent run? A saved-but-unprepared edit is invisible\n# to the running agent. Prepare, THEN ask again, before rewriting the prompt.\nout = agent.prepare_agent(agentId=AGENT_ID)\nprint(out[\"agentStatus\"])  # PREPARED -> now the edit is live"
+        },
+        {
+          "label": "From the terminal, check the prepared timestamp with get-agent — if preparedAt predates your edit, the edit was never compiled.",
+          "language": "shell",
+          "source": "aws bedrock-agent get-agent --agent-id BENEFITSAG01"
+        }
+      ],
+      "infrastructure": "// An edit that 'does nothing' is almost always a skipped PrepareAgent, not a bad prompt. The edit is saved to DRAFT but not compiled, so the agent runs the last prepared state. Prepare, then ask again, before rewriting the instruction. Iterating on wording against an uncompiled agent chases a bug that is not there.",
+      "workbench": {
+        "open": "diagnosis.py",
+        "files": [
+          {
+            "path": "diagnosis.py",
+            "body": "# Assemble the prepare-and-recheck from the snippets on the left, then Run.\n# The intercept returns a PREPARED status — the edit is now live.\n#\n# The goal: diagnose 'my edit did nothing' as a skipped prepare, and fix it\n# by preparing, before rewriting the instruction.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "This closes the loop with step 3. Prepare is a discrete compile step, and\nskipping it is the single most common classic-agent confusion: the edit is\nsaved, the agent ignores it, and the wording looks broken. The tell is\nget-agent's preparedAt predating your edit. The discipline is mechanical —\nprepare after every instruction or schema change — and the failure is\nalways the same quiet 'nothing happened.'\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agent",
+            "operation": "PrepareAgent",
+            "body": {
+              "agentId": "BENEFITSAG01",
+              "agentStatus": "PREPARED",
+              "agentVersion": "DRAFT",
+              "preparedAt": "2026-11-02T11:40:00Z"
+            }
+          },
+          {
+            "service": "bedrock-agent",
+            "operation": "GetAgent",
+            "body": {
+              "agent": {
+                "agentId": "BENEFITSAG01",
+                "agentStatus": "PREPARED",
+                "preparedAt": "2026-11-02T11:40:00Z"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

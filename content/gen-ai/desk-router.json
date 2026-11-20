@@ -1,0 +1,369 @@
+{
+  "schemaVersion": 1,
+  "id": "desk-router",
+  "name": "Desk router",
+  "summary": "One hospital desk in front of two specialists, where a billing turn reaching clinical tools withdraws the permission for the whole thing.",
+  "brief": {
+    "whoIsAsking": "Hospital staff hitting one desk with either a billing question or a clinical protocol question, expecting the right specialist and no crossover.",
+    "whatTheyNeedBack": "A billing answer from billing tools only, a protocol answer from clinical tools only, with neither specialist able to reach the other's tools or data.",
+    "systemsAlreadyRunning": "Two existing assistants: one billing, one clinical. One specialist is a Python loop the team wrote and keeps; one tool is a short eligibility lookup; another holds a database connection pool. There is also an old classic agent that may be migrated.",
+    "breaksWhen": "A billing turn reaches clinical tools. That separation is the only reason the hospital allowed one desk, and a single crossing withdraws the permission for all of it.",
+    "doneMeans": "A billing utterance only reaches billing tools, the Python loop keeps its session, the pooled tool stays up between calls, and a second agent is not introduced to check an answer that was already good."
+  },
+  "steps": [
+    {
+      "kind": "overview",
+      "title": "The system",
+      "diagram": {
+        "groups": [
+          { "id": "acct", "label": "AWS Account" }
+        ],
+        "nodes": [
+          { "id": "staff", "label": "Staff (one desk)", "flowsTo": ["supervisor"] },
+          { "id": "supervisor", "label": "Supervisor / router", "icon": "bedrock", "group": "acct", "flowsTo": ["billing", "clinical"] },
+          { "id": "billing", "label": "Billing specialist", "icon": "bedrock", "group": "acct", "flowsTo": ["lookup"] },
+          { "id": "clinical", "label": "Clinical specialist", "icon": "bedrock", "group": "acct", "flowsTo": ["pooled"] },
+          { "id": "lookup", "label": "Eligibility lookup (Lambda)", "icon": "lambda", "group": "acct" },
+          { "id": "pooled", "label": "Pooled tool (ECS)", "group": "acct" },
+          { "id": "role", "label": "IAM per specialist", "icon": "iam", "group": "acct" }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A supervisor whose specialists stay narrow",
+      "decision": "Whether one agent holds every tool, or a supervisor routes to specialists that each hold only their own.",
+      "why": "The whole permission the hospital granted rests on separation: a billing turn must not reach the chart. One agent with every tool cannot enforce that — the model holds billing and clinical tools at once, and a misread turn calls the wrong one. A supervisor (Agent Squad, or a routing agent) classifies the turn and hands it to a specialist that holds only its own tools: the billing specialist has no clinical tool in its toolset at all. Separation is structural, not a prompt instruction. Configuration: the lesson is the narrow-specialist supervisor. The losing choice is the mega-agent with every tool, which is one misclassification away from a billing question reaching the chart.",
+      "snippets": [
+        {
+          "label": "A supervisor that routes to narrow specialists. Each specialist's toolset is only its own domain.",
+          "language": "typescript",
+          "source": "const supervisor = new Supervisor(this, 'DeskRouter', {\n  classifier: billingVsClinicalClassifier,\n  specialists: [billingSpecialist, clinicalSpecialist],\n  // Each specialist is constructed with ONLY its own tools.\n});"
+        }
+      ],
+      "infrastructure": "// A supervisor classifies the turn and routes to a specialist that holds only its own tools. The billing specialist has no clinical tool in its toolset, so separation is structural. One agent with every tool is a single misclassification away from a billing turn reaching the chart.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the supervisor and its specialists from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: a router whose specialists each hold only their own tools, so\n// a billing turn structurally cannot reach clinical tools.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Agent Squad and a supervisor agent are two names for the same shape: a\nclassifier in front, narrow specialists behind. The narrowness is the\nsafety property — not 'the model is instructed not to use the clinical\ntool' but 'the billing specialist was never given the clinical tool.'\nInstructions are advisory; an empty toolset is structural. This is the\nmulti-agent version of per-tool IAM.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "specialists: [billingSpecialist, clinicalSpecialist]",
+            "present": true,
+            "message": "The supervisor routes to narrow specialists, each holding only its own tools — separation is structural."
+          },
+          {
+            "pattern": "ONLY its own tools",
+            "present": true,
+            "message": "Each specialist is constructed with only its own domain's tools, so the billing specialist cannot reach the chart."
+          },
+          {
+            "pattern": "allTools",
+            "present": false,
+            "message": "No single agent holding every tool. A mega-agent is one misclassification away from a billing turn reaching clinical tools."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "Strands on AgentCore with a real session id",
+      "decision": "Whether the team's existing Python loop is rewritten, or kept as a Strands agent on AgentCore Runtime with a persistent session.",
+      "why": "One specialist is a Python loop the team wrote and wants to keep. Strands runs that loop as an agent on AgentCore Runtime without a rewrite, and the session id carries the protocol state across turns. A fresh session id every turn forgets which protocol the clinician was in, so the specialist re-asks what it was just told. The session id must be stable per conversation. This is runnable: invoking the runtime with a persistent session id continues the loop's state. The losing move is a session id per turn, which makes a stateful loop behave statelessly and loses the thread.",
+      "snippets": [
+        {
+          "label": "The AgentCore runtime client, invoking the Strands specialist with a stable session id.",
+          "language": "python",
+          "source": "import boto3, json\n\nagent = boto3.client(\"bedrock-agentcore\", region_name=\"eu-central-1\")\n\nRUNTIME_ARN = \"arn:aws:bedrock-agentcore:eu-central-1:111122223333:runtime/clinical-strands\"\nSESSION_ID = \"sess-protocol-88\"  # stable per conversation, not per turn"
+        },
+        {
+          "label": "Invoke with the SAME session id each turn, so the Strands loop keeps the protocol it was in.",
+          "language": "python",
+          "source": "out = agent.invoke_agent_runtime(\n    agentRuntimeArn=RUNTIME_ARN,\n    runtimeSessionId=SESSION_ID,\n    payload=json.dumps({\"text\": \"continue the sepsis protocol check\"}),\n)\nprint(out[\"statusCode\"])  # the loop resumes its session state"
+        },
+        {
+          "label": "From the terminal, confirm the runtime is READY before invoking it — get-agent-runtime shows its status.",
+          "language": "shell",
+          "source": "aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id clinical-strands"
+        }
+      ],
+      "infrastructure": "// Strands runs the team's Python loop as an agent on AgentCore Runtime without a rewrite. The session id carries protocol state across turns; a fresh id every turn forgets the protocol and re-asks what it was told. The id is stable per conversation, so the stateful loop stays stateful.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the Strands invocation from the snippets on the left, then Run.\n# The intercept returns a continued session.\n#\n# The goal: invoke with a stable session id so the team's Python loop keeps\n# the protocol state across turns.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Strands is the 'keep the loop you wrote' primitive: it hosts an existing\nagent loop on AgentCore Runtime rather than making you re-express it as a\nclassic agent or a Harness. The session id is the whole lesson here —\nAgentCore sessions are how state persists, and generating one per turn is\nthe classic bug that makes a stateful agent amnesiac. Stable per\nconversation, fresh per conversation.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "bedrock-agentcore",
+            "operation": "InvokeAgentRuntime",
+            "body": {
+              "statusCode": 200,
+              "runtimeSessionId": "sess-protocol-88",
+              "continued": true
+            }
+          },
+          {
+            "service": "bedrock-agentcore-control",
+            "operation": "GetAgentRuntime",
+            "body": {
+              "agentRuntimeId": "clinical-strands",
+              "status": "READY"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The eligibility lookup on Lambda",
+      "decision": "Whether the short eligibility lookup runs on Lambda or a long-lived container.",
+      "why": "The eligibility lookup is a short, stateless call: take a member id, return whether a service is covered. That is exactly what Lambda is for — it spins up, answers, and costs nothing between calls. A container would be paying for an always-on service to answer a request that lasts milliseconds. The tool is exposed to the specialist as an MCP tool backed by the Lambda. This is runnable: invoking the lookup returns an eligibility result. The losing choice is putting a short, stateless call on a container because 'it is a tool,' which is cost for idle capacity the call does not need.",
+      "snippets": [
+        {
+          "label": "The eligibility lookup as a Lambda-backed MCP tool. Short and stateless — Lambda's shape exactly.",
+          "language": "python",
+          "source": "import boto3, json\n\nlam = boto3.client(\"lambda\", region_name=\"eu-central-1\")\n\nresp = lam.invoke(\n    FunctionName=\"eligibility-lookup\",\n    Payload=json.dumps({\"memberId\": \"M-5521\", \"service\": \"mri\"}),\n)\nprint(json.loads(resp[\"Payload\"].read()))"
+        },
+        {
+          "label": "From the terminal, confirm the lookup function is active before the specialist calls it — get-function shows its state.",
+          "language": "shell",
+          "source": "aws lambda get-function --function-name eligibility-lookup"
+        }
+      ],
+      "infrastructure": "// The eligibility lookup is a short, stateless call — member id in, covered-or-not out — so it runs on Lambda, which costs nothing between calls. A container would pay for always-on capacity a millisecond request does not need. The tool reaches the specialist as a Lambda-backed MCP tool.",
+      "workbench": {
+        "open": "answer.py",
+        "files": [
+          {
+            "path": "answer.py",
+            "body": "# Assemble the eligibility lookup from the snippets on the left, then Run.\n# The intercept returns a coverage result.\n#\n# The goal: a short stateless tool on Lambda, which fits the call's shape\n# and costs nothing idle.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The Lambda-vs-container decision is about the call's shape, not its\nimportance. Short, stateless, bursty: Lambda. The next step's pooled tool\nis the opposite shape and the opposite answer. Putting the lookup on a\ncontainer 'to match the pooled tool' would be paying for idle capacity; the\ntwo tools belong on different compute because they have different\nlifecycles.\n"
+          }
+        ],
+        "responses": [
+          {
+            "service": "lambda",
+            "operation": "Invoke",
+            "body": {
+              "StatusCode": 200,
+              "covered": true,
+              "memberId": "M-5521",
+              "service": "mri"
+            }
+          },
+          {
+            "service": "lambda",
+            "operation": "GetFunction",
+            "body": {
+              "Configuration": {
+                "FunctionName": "eligibility-lookup",
+                "State": "Active",
+                "Runtime": "provided.al2023"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "The pooled tool on ECS",
+      "decision": "Whether the tool that holds a database connection pool runs on Lambda or a long-lived ECS service.",
+      "why": "One tool holds a database connection pool. A pool does not survive a Lambda freeze: between invocations the execution environment is frozen or torn down, so the pool's sockets die, and opening a fresh pool on every cold start is the outage — the database runs out of connections under load. That tool belongs on a long-lived ECS service where the pool stays warm between requests. The compute follows the tool's lifecycle: stateful, connection-holding work needs a process that stays up. Configuration: the lesson is the pooled tool on ECS. The losing choice is the pooled tool on Lambda, which looks fine in a demo and collapses the database under real traffic.",
+      "snippets": [
+        {
+          "label": "The pooled tool on a long-lived ECS service, so the connection pool stays warm between requests.",
+          "language": "typescript",
+          "source": "const pooledTool = new FargateService(this, 'PooledTool', {\n  taskDefinition: pooledToolTask,\n  desiredCount: 2,\n  // A DB connection pool lives in a long-running process, not a Lambda\n  // that freezes between calls and drops the pool's sockets.\n});"
+        }
+      ],
+      "infrastructure": "// The pooled tool runs on ECS because a database connection pool must stay warm between requests. A Lambda freezes between invocations, killing the pool's sockets, and opening a fresh pool per cold start exhausts the database connections under load. Stateful, connection-holding work needs a process that stays up.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the pooled-tool service from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: the connection-pool tool on long-lived ECS, so the pool stays\n// warm instead of dying on every Lambda freeze.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "The mirror of the previous step. Lambda is right for the short stateless\nlookup; ECS is right for the pooled tool, because the deciding factor is\nlifecycle, not importance. The failure mode of getting this wrong is a\nconnection storm: a Lambda that opens a pool per cold start exhausts the\ndatabase's max connections under load, and the outage looks like a database\nproblem when it is a compute-choice problem.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "FargateService",
+            "present": true,
+            "message": "The pooled tool runs on a long-lived ECS/Fargate service, so the database connection pool stays warm between requests."
+          },
+          {
+            "pattern": "desiredCount",
+            "present": true,
+            "message": "A long-running service with a desired count keeps the pool alive, rather than a Lambda that freezes and drops its sockets."
+          },
+          {
+            "pattern": "lambda.Function",
+            "present": false,
+            "message": "The pooled tool is not a Lambda. A pool does not survive a Lambda freeze, and opening one per cold start exhausts the database under load."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A Harness only for a config-only specialist",
+      "decision": "When to add a specialist as an AgentCore Harness versus keeping it as the code the team already wrote.",
+      "why": "A Harness is the managed agent loop for a specialist that is configuration rather than code — declare the model, the tools, the instruction, and AgentCore runs the loop. It is the right choice when a specialist can be expressed as config and there is no existing loop to preserve. It is the wrong choice for the team's Python loop, which already exists and is kept on Strands. Choosing a Harness for the Python loop would mean re-expressing working code as configuration, losing the exact behavior the team trusts. Configuration: the lesson is the Harness for the config-only specialist, Strands for the hand-written loop. The losing choice is forcing the existing loop into a Harness.",
+      "snippets": [
+        {
+          "label": "A Harness for a specialist that is pure configuration — model, tools, instruction, managed loop.",
+          "language": "typescript",
+          "source": "const scheduleSpecialist = new Harness(this, 'ScheduleSpecialist', {\n  model: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0',\n  tools: [scheduleLookupTool],\n  instruction: scheduleInstruction,\n  // Config, not code. The Python loop specialist stays on Strands.\n});"
+        }
+      ],
+      "infrastructure": "// A Harness is the managed loop for a config-only specialist: model, tools, instruction, and AgentCore runs the loop. It fits a specialist that has no existing code to preserve. The team's Python loop is not that specialist — it stays on Strands, because re-expressing working code as config loses the behavior the team trusts.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the config-only specialist as a Harness from the snippet on the\n// left. Configuration step: nothing to Run.\n//\n// The goal: a Harness for a specialist that is pure config, while the\n// hand-written Python loop stays on Strands.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Three ways to run a specialist, three fits: a classic agent (migrated,\nnext step), a Strands agent (an existing loop you keep), and a Harness (a\nspecialist expressible as config). The Harness is the lowest-effort path\nwhen there is nothing to preserve. The trap is using it for the Python\nloop — that loop is code the team wrote and trusts, and flattening it into\nHarness config is a rewrite disguised as a config change.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "Harness",
+            "present": true,
+            "message": "A Harness runs the config-only specialist's loop — model, tools, instruction — with no code to maintain."
+          },
+          {
+            "pattern": "Config, not code",
+            "present": true,
+            "message": "The Harness is for a specialist expressible as configuration. The Python loop, which is code, stays on Strands."
+          },
+          {
+            "pattern": "rewritePythonLoop",
+            "present": false,
+            "message": "The Python loop is not rewritten into a Harness. Flattening working code into config loses the behavior the team trusts."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "A migrated classic agent is re-tested",
+      "decision": "Whether a classic agent moved into this router is assumed behavior-identical, or re-tested against the dialogs you already trust.",
+      "why": "The old classic agent, if you move one of the specialists onto a new runtime, will not behave identically. Model defaults, tool invocation, and prompt handling differ enough that the migration is a behavior change, not a lift-and-shift. The dialogs you already trust are the test: replay them against the migrated specialist and compare, rather than hoping it matches. Configuration: the lesson is treating migration as re-testing against a trusted dialog set. The losing choice is assuming behavior-identity and shipping — the migrated agent passes a smoke test and then answers a real protocol question differently than the version clinicians relied on.",
+      "snippets": [
+        {
+          "label": "The migration test: replay the trusted dialogs against the migrated specialist and compare.",
+          "language": "typescript",
+          "source": "const migrationEval = {\n  dataset: 'trusted-dialogs.jsonl',\n  compareAgainst: 'classic-agent-baseline',\n  failsWhen: 'the migrated specialist diverges from the trusted dialog answers',\n};\n// Migration is not behavior-identical. The old dialogs are the test."
+        }
+      ],
+      "infrastructure": "// Moving the classic agent onto a new runtime is a behavior change, not a lift-and-shift: model defaults and tool handling differ. The dialogs clinicians already trust are the regression test — replay and compare. Assuming behavior-identity and shipping is how the migrated specialist answers a real protocol question differently than the one relied on.",
+      "workbench": {
+        "open": "eval.ts",
+        "files": [
+          {
+            "path": "eval.ts",
+            "body": "// Assemble the migration eval from the snippet on the left. Configuration\n// step: nothing to Run.\n//\n// The goal: the migrated specialist is re-tested against the trusted\n// dialogs, not assumed to behave identically to the classic agent.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Migration between agent runtimes is a behavior change by default. The safe\nmove treats the existing, trusted conversations as a regression suite: run\nthem against the migrated specialist and diff the answers. This is the\nagent analogue of the brand-voice and policy eval gates — the thing you\ntrust becomes the thing you test against, so a silent behavior drift fails\na check instead of reaching a clinician.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "trusted-dialogs.jsonl",
+            "present": true,
+            "message": "The trusted dialogs are the migration regression set, replayed against the migrated specialist."
+          },
+          {
+            "pattern": "compareAgainst",
+            "present": true,
+            "message": "The migrated specialist is compared against the classic-agent baseline, so a behavior divergence is caught."
+          },
+          {
+            "pattern": "not behavior-identical",
+            "present": true,
+            "message": "Migration is treated as a behavior change, not a lift-and-shift. Assuming identity and shipping is how a protocol answer silently drifts."
+          }
+        ]
+      }
+    },
+    {
+      "kind": "call",
+      "title": "No reflection agent when one specialist suffices",
+      "decision": "Whether to add a second agent to check the specialist's answer, or stop when one specialist already meets the bar.",
+      "why": "A reflection agent — a second model call that critiques the first — is sometimes worth it, when answers are unreliable and the critique measurably improves them. Here one specialist already answers the question well. Adding a reflection pass is another model call (cost, latency) and another place to be wrong: the critic can reject a good answer or launder a bad one. You do not add it to a pipeline that already meets the bar. Configuration: the lesson is declining the extra agent when it earns nothing. The losing choice is a reflection agent added because it sounds rigorous, which doubles the cost to check an answer that was already correct.",
+      "snippets": [
+        {
+          "label": "The decision recorded: one specialist meets the bar, so no reflection agent is added.",
+          "language": "typescript",
+          "source": "const pipeline = {\n  specialist: 'answers directly',\n  reflection: false, // the specialist already meets the bar\n  // A critique pass is another model call and another way to be wrong.\n};"
+        }
+      ],
+      "infrastructure": "// No reflection agent: one specialist already answers the question well, so a second critiquing model call is cost, latency, and a new failure mode (rejecting a good answer or passing a bad one). Reflection earns its place only when the base answer is unreliable and the critique measurably helps — not here.",
+      "workbench": {
+        "open": "stack.ts",
+        "files": [
+          {
+            "path": "stack.ts",
+            "body": "// Assemble the pipeline decision from the snippet on the left.\n// Configuration step: nothing to Run.\n//\n// The goal: record that one specialist meets the bar, so no reflection\n// agent is added to check an answer that was already good.\n"
+          },
+          {
+            "path": "NOTES.md",
+            "body": "Reflection and multi-agent critique are real techniques with a real cost.\nThe exam-relevant judgment is knowing when NOT to reach for them: a second\nagent doubles the model spend and adds a component that can be wrong in its\nown right. When the single specialist already clears the quality bar, the\nextra agent buys nothing and risks regressing a good answer. Restraint is\nthe lesson, matching the Done means: no second agent to 'check' a good one.\n"
+          }
+        ],
+        "responses": [],
+        "checks": [
+          {
+            "pattern": "reflection: false",
+            "present": true,
+            "message": "No reflection pass: one specialist meets the bar, so a second critiquing model call is not added."
+          },
+          {
+            "pattern": "another way to be wrong",
+            "present": true,
+            "message": "A critique pass is recorded as cost and a new failure mode, not a free improvement — it earns its place only when the base answer is unreliable."
+          },
+          {
+            "pattern": "reflectionAgent = new",
+            "present": false,
+            "message": "No reflection agent is constructed. Adding one to a pipeline that already meets the bar doubles the cost to check an answer that was already correct."
+          }
+        ]
+      }
+    }
+  ]
+}
