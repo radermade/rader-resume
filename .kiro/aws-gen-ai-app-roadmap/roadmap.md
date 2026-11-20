@@ -19,6 +19,7 @@ This file is the plan. Phase folders with `requirements.md`, `design.md`, and
 | 1 | Skeleton on `/gen-ai` | Done, deployed |
 | 2 | The workbench is real | Done, deployed |
 | 3 | One scenario, start to finish | Specced |
+| 3.5 | Dual-pane step: run code, check infrastructure | Specced |
 | 4 | The catalog | Not started |
 
 Phase 2 shipped beyond its original plan: jedi typeahead, the
@@ -1242,6 +1243,24 @@ infrastructure block on each later step. The diagram shows each AWS product as
 its icon with the name under it, inside dashed groups, on orthogonal
 connectors. The workbench is the same column from step 2 on, and advancing a
 step does not clear it.
+
+### 3.5 Dual-pane step: run code, check infrastructure
+
+A small subphase between 3 and 4. A single step gains a second editor below the
+code editor: the Python call you Run against the intercept, and the CDK
+infrastructure you assemble and Check against an answer key, stacked. It reuses
+the config step's existing structural-check mechanism rather than inventing
+anything — code is executed (the sandbox can verify a call), infrastructure is
+structurally checked (a browser cannot deploy CDK, and a faked synth would be
+dishonest). No in-browser synth, compiler, or CloudFormation emulation; those
+were considered and rejected as disproportionate. A step opts in by carrying
+both intercepted responses and infra checks; nothing becomes dual
+automatically. One worked step demonstrates it. See `phase3.5/`.
+
+Done when a dual step renders two editors, Run prints the call result and Check
+reports infra pass/fail independently, pure-runnable and pure-config steps are
+unchanged, and the parse guards accept the dual case while still rejecting the
+degenerate ones.
 
 ### 4. The catalog
 
