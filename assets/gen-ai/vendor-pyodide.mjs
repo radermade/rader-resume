@@ -160,13 +160,26 @@ async function resolveWheels() {
 
   // PyPI roots and their deps that are not in the lockfile: botocore,
   // jmespath, s3transfer. Pure wheels on PyPI.
-  const PYPI_ONLY = ['boto3', 'botocore', 'jmespath', 's3transfer'];
+  //
+  // Pinned to exact versions. PyPI's latest moves near-daily for boto3 and
+  // botocore, so an unpinned resolve drifts from the WHEELS list in
+  // workbench.js and the smoke test fails on a fresh checkout. Bump these and
+  // WHEELS together, deliberately.
+  const PYPI_PINS = {
+    boto3: '1.43.123',
+    botocore: '1.43.123',
+    jmespath: '1.1.0',
+    s3transfer: '0.19.3',
+  };
+  const PYPI_ONLY = Object.keys(PYPI_PINS);
   for (const p of PYPI_ONLY) want.add(norm(p));
 
   const names = [];
 
   async function pypiWheelUrl(pkg) {
-    const res = await fetch(`https://pypi.org/pypi/${pkg}/json`);
+    const version = PYPI_PINS[pkg];
+    if (!version) throw new Error(`no version pinned for ${pkg}`);
+    const res = await fetch(`https://pypi.org/pypi/${pkg}/${version}/json`);
     if (!res.ok) throw new Error(`PyPI ${pkg} -> ${res.status}`);
     const data = await res.json();
     const files = data.urls || [];
